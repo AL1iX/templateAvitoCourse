@@ -13,6 +13,7 @@ import (
 	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/config"
 	"github.com/AL1iX/templateAvitoCourse/internal/httpapi"
+	"github.com/AL1iX/templateAvitoCourse/internal/idempotency"
 	"github.com/AL1iX/templateAvitoCourse/internal/postgres"
 	"github.com/AL1iX/templateAvitoCourse/internal/trip"
 	"github.com/AL1iX/templateAvitoCourse/internal/txmanager"
@@ -40,8 +41,9 @@ func main() {
 
 	tripTxManager := txmanager.New(pool)
 	tripRepo := trip.NewRepository(tripTxManager)
+	idemRepo := idempotency.NewRepository(tripTxManager)
 
-	handler := httpapi.NewHandler(pool, logger, cfg, tripTxManager, tripRepo)
+	handler := httpapi.NewHandler(pool, logger, cfg, tripTxManager, tripRepo, idemRepo)
 
 	router := chi.NewRouter()
 	apiHandler := api.HandlerFromMux(handler, router)

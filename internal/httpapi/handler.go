@@ -1,9 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -13,6 +17,7 @@ import (
 
 	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/config"
+	"github.com/AL1iX/templateAvitoCourse/internal/idempotency"
 	"github.com/AL1iX/templateAvitoCourse/internal/trip"
 	"github.com/AL1iX/templateAvitoCourse/internal/txmanager"
 )
@@ -26,10 +31,11 @@ type Handler struct {
 
 	tx   *txmanager.TxManager
 	trip *trip.Repository
+	idem *idempotency.Repository
 }
 
-func NewHandler(pool *pgxpool.Pool, logger *slog.Logger, cfg config.Config, tx *txmanager.TxManager, tripRepo *trip.Repository) *Handler {
-	return &Handler{pool: pool, logger: logger, cfg: cfg, tx: tx, trip: tripRepo}
+func NewHandler(pool *pgxpool.Pool, logger *slog.Logger, cfg config.Config, tx *txmanager.TxManager, tripRepo *trip.Repository, idemRepo *idempotency.Repository) *Handler {
+	return &Handler{pool: pool, logger: logger, cfg: cfg, tx: tx, trip: tripRepo, idem: idemRepo}
 }
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
@@ -55,16 +61,44 @@ func writeHealth(w http.ResponseWriter, status int, value api.HealthResponseStat
 }
 
 const (
-	typeInvalidRequest = "https://tripgo.example/problems/invalid-request"
-	typeTripNotFound   = "https://tripgo.example/problems/trip-not-found"
-	typeTripCompleted  = "https://tripgo.example/problems/trip-completed"
-	typeDriverBusy     = "https://tripgo.example/problems/driver-busy"
-	typeInternalError  = "https://tripgo.example/problems/internal-error"
+	typeInvalidRequest      = "https://tripgo.example/problems/invalid-request"
+	typeTripNotFound        = "https://tripgo.example/problems/trip-not-found"
+	typeTripCompleted       = "https://tripgo.example/problems/trip-completed"
+	typeDriverBusy          = "https://tripgo.example/problems/driver-busy"
+	typeIdempotencyConflict = "https://tripgo.example/problems/idempotency-conflict"
+	typeInternalError       = "https://tripgo.example/problems/internal-error"
 )
 
+// errIdempotencyRace signals that a concurrent request claimed the same
+// Idempotency-Key first; the caller looks up that request's stored response.
+var errIdempotencyRace = errors.New("idempotency key claimed by a concurrent request")
+
 func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.CreateTripParams) {
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: "+err.Error())
+		return
+	}
+
+	var idempotencyKey, requestHash string
+	if params.IdempotencyKey != nil {
+		idempotencyKey = params.IdempotencyKey.String()
+		requestHash = hashRequestBody(rawBody)
+
+		existing, getErr := h.idem.Get(r.Context(), idempotencyKey)
+		switch {
+		case getErr == nil:
+			h.respondIdempotent(w, r, existing, requestHash)
+			return
+		case !errors.Is(getErr, idempotency.ErrNotFound):
+			h.logger.Error("idempotency lookup failed", "error", getErr)
+			writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+			return
+		}
+	}
+
 	var body api.TripData
-	dec := json.NewDecoder(r.Body)
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
 		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: "+err.Error())
@@ -96,13 +130,41 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.
 		StartedAt:      time.Now().UTC(),
 	}
 
-	err := h.tx.Do(r.Context(), func(ctx context.Context) error {
+	err = h.tx.Do(r.Context(), func(ctx context.Context) error {
+		if idempotencyKey != "" {
+			reserved, err := h.idem.Reserve(ctx, idempotencyKey, requestHash)
+			if err != nil {
+				return err
+			}
+			if !reserved {
+				return errIdempotencyRace
+			}
+		}
 		if err := h.trip.Create(ctx, t); err != nil {
 			return err
 		}
-		return h.trip.AddStatusHistory(ctx, t.ID, nil, trip.StatusActive, "trip created")
+		if err := h.trip.AddStatusHistory(ctx, t.ID, nil, trip.StatusActive, "trip created"); err != nil {
+			return err
+		}
+		if idempotencyKey != "" {
+			responseBody, err := json.Marshal(toAPITrip(t))
+			if err != nil {
+				return err
+			}
+			return h.idem.Fill(ctx, idempotencyKey, responseBody)
+		}
+		return nil
 	})
 	switch {
+	case errors.Is(err, errIdempotencyRace):
+		existing, getErr := h.idem.Get(r.Context(), idempotencyKey)
+		if getErr != nil {
+			h.logger.Error("idempotency lookup after race failed", "error", getErr)
+			writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+			return
+		}
+		h.respondIdempotent(w, r, existing, requestHash)
+		return
 	case errors.Is(err, trip.ErrDriverBusy):
 		writeProblem(w, r, http.StatusConflict, typeDriverBusy, "driver_busy", "Driver busy", "driver already has an active trip")
 		return
@@ -114,6 +176,21 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.
 
 	w.Header().Set("Location", "/api/v1/trips/"+t.ID)
 	writeJSON(w, http.StatusCreated, toAPITrip(t))
+}
+
+func (h *Handler) respondIdempotent(w http.ResponseWriter, r *http.Request, existing idempotency.Record, requestHash string) {
+	if existing.RequestHash != requestHash {
+		writeProblem(w, r, http.StatusConflict, typeIdempotencyConflict, "idempotency_conflict", "Idempotency conflict", "Idempotency-Key was already used with a different request body")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(existing.ResponseBody)
+}
+
+func hashRequestBody(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, tripId api.TripId) {

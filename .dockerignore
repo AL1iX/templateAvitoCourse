@@ -1,0 +1,10 @@
+.git/
+.idea/
+.tripgo/
+bin/
+.env
+.env.example
+CLAUDE.md
+pr_description.md
+trip.json
+README.md
