@@ -52,9 +52,6 @@ func (r *Repository) Get(ctx context.Context, key string) (Record, error) {
 	return rec, nil
 }
 
-// Reserve claims key for this request. It returns false, without error, when
-// another request already claimed the same key: the caller should abort its
-// own transaction and look up that request's stored response instead.
 func (r *Repository) Reserve(ctx context.Context, key, requestHash string) (bool, error) {
 	exec := r.tx.Executor(ctx)
 

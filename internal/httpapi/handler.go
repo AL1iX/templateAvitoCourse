@@ -69,8 +69,6 @@ const (
 	typeInternalError       = "https://tripgo.example/problems/internal-error"
 )
 
-// errIdempotencyRace signals that a concurrent request claimed the same
-// Idempotency-Key first; the caller looks up that request's stored response.
 var errIdempotencyRace = errors.New("idempotency key claimed by a concurrent request")
 
 func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.CreateTripParams) {
