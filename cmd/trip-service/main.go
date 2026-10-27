@@ -10,8 +10,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/config"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 	"github.com/AL1iX/templateAvitoCourse/internal/httpapi"
 	"github.com/AL1iX/templateAvitoCourse/internal/idempotency"
 	"github.com/AL1iX/templateAvitoCourse/internal/postgres"
@@ -46,7 +46,10 @@ func main() {
 	handler := httpapi.NewHandler(pool, logger, cfg, tripTxManager, tripRepo, idemRepo)
 
 	router := chi.NewRouter()
-	apiHandler := api.HandlerFromMux(handler, router)
+	apiHandler := generated.HandlerWithOptions(handler, generated.ChiServerOptions{
+		BaseRouter:       router,
+		ErrorHandlerFunc: handler.BadParameter,
+	})
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

@@ -87,8 +87,8 @@ curl -i localhost:8080/ready
 | Метод | Путь | Коды ответа |
 |---|---|---|
 | `POST` | `/api/v1/trips` | `201`, `200`, `400`, `409` |
-| `GET` | `/api/v1/trips/{tripId}` | `200`, `404` |
-| `POST` | `/api/v1/trips/{tripId}/finish` | `200`, `404`, `409` |
+| `GET` | `/api/v1/trips/{tripId}` | `200`, `400`, `404` |
+| `POST` | `/api/v1/trips/{tripId}/finish` | `200`, `400`, `404`, `409` |
 | `GET` | `/health` | `200` |
 | `GET` | `/ready` | `200`, `503` |
 
@@ -101,7 +101,12 @@ curl -i localhost:8080/ready
 `POST /api/v1/trips` принимает необязательный заголовок `Idempotency-Key`
 (UUID). Повторный запрос с тем же ключом и тем же телом возвращает уже
 созданную поездку с кодом `200`, а не создаёт вторую. Тот же ключ с другим
-телом даёт `409 idempotency_conflict`.
+телом даёт `409 idempotency_conflict`. Ключ вне формата UUID даёт `400
+invalid_request`.
+
+Ключи хранятся в таблице `idempotency_keys` вместе с датой создания и сейчас
+не удаляются: очистки по сроку нет, повтор с тем же ключом всегда возвращает
+ту же поездку.
 
 ## Docker
 
@@ -111,11 +116,19 @@ docker run --rm -p 8080:8080 --env-file .env trip-service
 ```
 
 Сборка двухэтапная: `golang:1.27-alpine` компилирует статический бинарник,
-в финальном образе на `alpine:3.20` лежит только он, без Go-тулчейна и
-исходников, процесс запускается от `nobody`. Если PostgreSQL поднят на
-хост-машине (как при локальной разработке через `tripgoctl`), значение
-`localhost` в `DATABASE_URL` внутри контейнера указывает на сам контейнер, а
-не на хост: замените его на `host.docker.internal`.
+в финальном образе на `gcr.io/distroless/static-debian12:nonroot` лежит только
+он, без Go-тулчейна, оболочки и исходников, процесс запускается от
+пользователя `nonroot`. Размер финального образа: 9.07 МБ в сжатом виде,
+31.1 МБ на диске (по выводу `docker images`).
+
+Если PostgreSQL поднят на хост-машине (как при локальной разработке через
+`tripgoctl`), значение `localhost` в `DATABASE_URL` внутри контейнера
+указывает на сам контейнер, а не на хост. Подставьте `host.docker.internal`:
+
+```bash
+docker run --rm -p 8080:8080 --env-file .env \
+  -e DATABASE_URL="${DATABASE_URL//localhost/host.docker.internal}" trip-service
+```
 
 ## Решения
 

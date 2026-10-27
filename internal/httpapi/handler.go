@@ -15,15 +15,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/config"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 	"github.com/AL1iX/templateAvitoCourse/internal/idempotency"
 	"github.com/AL1iX/templateAvitoCourse/internal/trip"
 	"github.com/AL1iX/templateAvitoCourse/internal/txmanager"
 )
 
 type Handler struct {
-	api.Unimplemented
+	generated.Unimplemented
 
 	pool   *pgxpool.Pool
 	logger *slog.Logger
@@ -39,7 +39,7 @@ func NewHandler(pool *pgxpool.Pool, logger *slog.Logger, cfg config.Config, tx *
 }
 
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
-	writeHealth(w, http.StatusOK, api.Ok)
+	writeHealth(w, http.StatusOK, generated.Ok)
 }
 
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
@@ -48,13 +48,13 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.pool.Ping(ctx); err != nil {
 		h.logger.Warn("readiness check failed", "error", err)
-		writeHealth(w, http.StatusServiceUnavailable, api.Unavailable)
+		writeHealth(w, http.StatusServiceUnavailable, generated.Unavailable)
 		return
 	}
-	writeHealth(w, http.StatusOK, api.Ok)
+	writeHealth(w, http.StatusOK, generated.Ok)
 }
 
-func writeHealth(w http.ResponseWriter, status int, value api.HealthResponseStatus) {
+func writeHealth(w http.ResponseWriter, status int, value generated.HealthResponseStatus) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(`{"status":"` + string(value) + `"}`))
@@ -71,7 +71,7 @@ const (
 
 var errIdempotencyRace = errors.New("idempotency key claimed by a concurrent request")
 
-func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.CreateTripParams) {
+func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params generated.CreateTripParams) {
 	rawBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: "+err.Error())
@@ -95,7 +95,7 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params api.
 		}
 	}
 
-	var body api.TripData
+	var body generated.TripData
 	dec := json.NewDecoder(bytes.NewReader(rawBody))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
@@ -191,7 +191,7 @@ func hashRequestBody(body []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, tripId api.TripId) {
+func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, tripId generated.TripId) {
 	t, err := h.trip.GetByID(r.Context(), tripId.String())
 	switch {
 	case errors.Is(err, trip.ErrNotFound):
@@ -205,7 +205,7 @@ func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, tripId api.Tri
 	writeJSON(w, http.StatusOK, toAPITrip(t))
 }
 
-func (h *Handler) FinishTrip(w http.ResponseWriter, r *http.Request, tripId api.TripId) {
+func (h *Handler) FinishTrip(w http.ResponseWriter, r *http.Request, tripId generated.TripId) {
 	id := tripId.String()
 	now := time.Now().UTC()
 
@@ -238,19 +238,19 @@ func (h *Handler) FinishTrip(w http.ResponseWriter, r *http.Request, tripId api.
 	writeJSON(w, http.StatusOK, toAPITrip(t))
 }
 
-func validCoordinates(c api.Coordinates) bool {
+func validCoordinates(c generated.Coordinates) bool {
 	return c.Latitude >= -90 && c.Latitude <= 90 && c.Longitude >= -180 && c.Longitude <= 180
 }
 
-func toAPITrip(t trip.Trip) api.Trip {
-	return api.Trip{
+func toAPITrip(t trip.Trip) generated.Trip {
+	return generated.Trip{
 		Id:         uuid.MustParse(t.ID),
 		UserId:     uuid.MustParse(t.UserID),
 		DriverId:   uuid.MustParse(t.DriverID),
-		StartPoint: api.Coordinates{Latitude: t.StartLatitude, Longitude: t.StartLongitude},
-		EndPoint:   api.Coordinates{Latitude: t.EndLatitude, Longitude: t.EndLongitude},
+		StartPoint: generated.Coordinates{Latitude: t.StartLatitude, Longitude: t.StartLongitude},
+		EndPoint:   generated.Coordinates{Latitude: t.EndLatitude, Longitude: t.EndLongitude},
 		Price:      t.Price,
-		Status:     api.TripStatus(t.Status),
+		Status:     generated.TripStatus(t.Status),
 		StartedAt:  t.StartedAt,
 		FinishedAt: t.FinishedAt,
 	}
@@ -264,7 +264,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeProblem(w http.ResponseWriter, r *http.Request, status int, problemType, code, title, detail string) {
 	instance := r.URL.Path
-	p := api.Problem{
+	p := generated.Problem{
 		Type:     problemType,
 		Title:    title,
 		Status:   int32(status),
@@ -277,4 +277,13 @@ func writeProblem(w http.ResponseWriter, r *http.Request, status int, problemTyp
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(p)
+}
+
+func (h *Handler) BadParameter(w http.ResponseWriter, r *http.Request, err error) {
+	detail := "invalid parameter"
+	var invalid *generated.InvalidParamFormatError
+	if errors.As(err, &invalid) {
+		detail = invalid.ParamName + ": invalid format"
+	}
+	writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", detail)
 }

@@ -8,11 +8,11 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -o /out/trip-service ./cmd/trip-service
 
-FROM alpine:3.20
+FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY --from=build /out/trip-service /usr/local/bin/trip-service
+COPY --from=build /out/trip-service /trip-service
 
-USER nobody
+USER nonroot:nonroot
 EXPOSE 8080
 
-ENTRYPOINT ["/usr/local/bin/trip-service"]
+ENTRYPOINT ["/trip-service"]
