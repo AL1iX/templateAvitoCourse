@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/AL1iX/templateAvitoCourse/internal/config"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AL1iX/templateAvitoCourse/internal/config"
 )
 
-func NewPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
+func NewPool(ctx context.Context, cfg config.Config, tracer pgx.QueryTracer) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse database url: %w", err)
@@ -18,6 +20,7 @@ func NewPool(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
 	poolConfig.MinConns = cfg.DatabaseMinConns
 	poolConfig.MaxConnLifetime = cfg.DatabaseMaxConnLifetime
 	poolConfig.ConnConfig.ConnectTimeout = cfg.DatabaseConnectTimeout
+	poolConfig.ConnConfig.Tracer = tracer
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {

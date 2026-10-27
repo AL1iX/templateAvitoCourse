@@ -1,4 +1,4 @@
-package txmanager
+package transaction
 
 import (
 	"context"
@@ -20,33 +20,30 @@ type Executor interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-type TxManager struct {
+type Manager struct {
 	pool *pgxpool.Pool
 }
 
-func New(pool *pgxpool.Pool) *TxManager {
-	return &TxManager{pool: pool}
+func New(pool *pgxpool.Pool) *Manager {
+	return &Manager{pool: pool}
 }
 
-func (m *TxManager) Executor(ctx context.Context) Executor {
+func (m *Manager) Executor(ctx context.Context) Executor {
 	if tx, ok := ctx.Value(txKey).(pgx.Tx); ok {
 		return tx
 	}
 	return m.pool
 }
-func (m *TxManager) Do(ctx context.Context, fn func(ctx context.Context) error) error {
+
+func (m *Manager) Do(ctx context.Context, fn func(ctx context.Context) error) error {
 	if _, alreadyInTx := ctx.Value(txKey).(pgx.Tx); alreadyInTx {
 		return fn(ctx)
 	}
 
-	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel: pgx.ReadCommitted,
-	})
+	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
-
-	txCtx := context.WithValue(ctx, txKey, tx)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -55,7 +52,7 @@ func (m *TxManager) Do(ctx context.Context, fn func(ctx context.Context) error) 
 		}
 	}()
 
-	if err := fn(txCtx); err != nil {
+	if err := fn(context.WithValue(ctx, txKey, tx)); err != nil {
 		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
 			return fmt.Errorf("rollback after %v: %w", err, rbErr)
 		}

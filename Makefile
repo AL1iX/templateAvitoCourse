@@ -1,4 +1,4 @@
-.PHONY: migrate run test generate
+.PHONY: migrate run generate lint test test-integration
 
 migrate:
 	go tool goose -dir ./migrations postgres "$$DATABASE_URL" up
@@ -6,10 +6,17 @@ migrate:
 run:
 	go run ./cmd/trip-service
 
-test:
-	go test -race ./...
-
 generate:
 	go tool oapi-codegen -generate types,chi-server -package api \
 		-include-operation-ids createTrip,getTrip,finishTrip,health,ready \
 		-o api/api.gen.go contracts/openapi/trip-service.openapi.yaml
+	go generate ./...
+
+lint:
+	go tool golangci-lint run ./...
+
+test:
+	go test -race -count=2 -cover ./...
+
+test-integration:
+	go test -race -count=1 -tags integration ./...
