@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 )
 
 type Handler struct {
@@ -20,7 +20,7 @@ func New(db pinger, timeout time.Duration, logger *slog.Logger) *Handler {
 }
 
 func (h *Handler) Health(w http.ResponseWriter, _ *http.Request) {
-	write(w, http.StatusOK, api.Ok)
+	write(w, http.StatusOK, generated.Ok)
 }
 
 func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
@@ -29,13 +29,13 @@ func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.db.Ping(ctx); err != nil {
 		h.logger.WarnContext(r.Context(), "readiness check failed", "error", err)
-		write(w, http.StatusServiceUnavailable, api.Unavailable)
+		write(w, http.StatusServiceUnavailable, generated.Unavailable)
 		return
 	}
-	write(w, http.StatusOK, api.Ok)
+	write(w, http.StatusOK, generated.Ok)
 }
 
-func write(w http.ResponseWriter, status int, value api.HealthResponseStatus) {
+func write(w http.ResponseWriter, status int, value generated.HealthResponseStatus) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(`{"status":"` + string(value) + `"}`))

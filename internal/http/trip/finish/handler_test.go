@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/domain/trip"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/domainerror"
 )
 
@@ -74,16 +74,16 @@ func TestHandle(t *testing.T) {
 			require.Equal(t, tc.wantStatus, rec.Code)
 			require.NotContains(t, rec.Body.String(), "password")
 			if tc.wantCode != "" {
-				var problem api.Problem
+				var problem generated.Problem
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
 				require.Equal(t, tc.wantCode, problem.Code)
 				return
 			}
 
-			var got api.Trip
+			var got generated.Trip
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 			require.Equal(t, tripID, got.Id.String())
-			require.Equal(t, api.TripStatus("completed"), got.Status)
+			require.Equal(t, generated.TripStatus("completed"), got.Status)
 		})
 	}
 }

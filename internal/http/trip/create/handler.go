@@ -5,8 +5,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/domain/trip"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 )
 
 type Handler struct {
@@ -18,7 +18,7 @@ func New(uc useCase, errw errorWriter) *Handler {
 	return &Handler{uc: uc, errw: errw}
 }
 
-func (h *Handler) Handle(w http.ResponseWriter, r *http.Request, params api.CreateTripParams) {
+func (h *Handler) Handle(w http.ResponseWriter, r *http.Request, params generated.CreateTripParams) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.errw.Write(w, r, &trip.ValidationError{Field: "body", Reason: err.Error()})

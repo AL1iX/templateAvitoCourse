@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/domain/trip"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 )
 
 const (
@@ -27,7 +27,7 @@ func New(logger *slog.Logger) *Mapper {
 	return &Mapper{logger: logger}
 }
 
-func Problem(err error) (int, api.Problem) {
+func Problem(err error) (int, generated.Problem) {
 	var verr *trip.ValidationError
 
 	switch {
@@ -47,8 +47,8 @@ func Problem(err error) (int, api.Problem) {
 	}
 }
 
-func build(status int32, problemType, code, title, detail string) (int, api.Problem) {
-	p := api.Problem{
+func build(status int32, problemType, code, title, detail string) (int, generated.Problem) {
+	p := generated.Problem{
 		Type:   problemType,
 		Title:  title,
 		Status: status,

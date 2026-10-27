@@ -69,6 +69,17 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 	txManager := transaction.New(pool)
 	tripRepo := triprepo.New(txManager)
 
+	err = telemetry.RegisterActiveTrips(tel.MeterProvider.Meter(instrumentationName),
+		func(ctx context.Context) (int64, error) {
+			ctx, cancel := context.WithTimeout(ctx, cfg.DatabaseQueryTimeout)
+			defer cancel()
+			return tripRepo.CountActive(ctx)
+		})
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+
 	createUC := createuc.New(tripRepo, tripRepo, txManager, m.trips, logger)
 	getUC := getuc.New(tripRepo)
 	finishUC := finishuc.New(tripRepo, txManager, m.trips, logger)
@@ -79,6 +90,7 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 		gethttp.New(getUC, errMapper),
 		finishhttp.New(finishUC, errMapper),
 		health.New(pool, cfg.DatabaseConnectTimeout, logger),
+		errMapper,
 		middleware.Recover(errMapper),
 		middleware.Tracing(tel.TracerProvider, tel.Propagator),
 		middleware.Logging(logger),
@@ -123,16 +135,16 @@ func (c *Container) Run(ctx context.Context) error {
 	if err := c.server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
+	c.logger.Info("http server stopped")
 	return nil
 }
 
 func (c *Container) Close() {
-	c.pool.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), c.shutdownTimeout)
 	defer cancel()
 
 	if err := c.telemetry.Shutdown(ctx); err != nil {
 		c.logger.Warn("telemetry shutdown failed", "error", err)
 	}
+	c.pool.Close()
 }

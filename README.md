@@ -112,8 +112,8 @@ curl -i localhost:8080/ready
 | Метод | Путь | Коды ответа |
 |---|---|---|
 | `POST` | `/api/v1/trips` | `201`, `200`, `400`, `409` |
-| `GET` | `/api/v1/trips/{tripId}` | `200`, `404` |
-| `POST` | `/api/v1/trips/{tripId}/finish` | `200`, `404`, `409` |
+| `GET` | `/api/v1/trips/{tripId}` | `200`, `400`, `404` |
+| `POST` | `/api/v1/trips/{tripId}/finish` | `200`, `400`, `404`, `409` |
 | `GET` | `/health` | `200` |
 | `GET` | `/ready` | `200`, `503` |
 
@@ -126,7 +126,12 @@ curl -i localhost:8080/ready
 `POST /api/v1/trips` принимает необязательный заголовок `Idempotency-Key`
 (UUID). Повторный запрос с тем же ключом и тем же телом возвращает уже
 созданную поездку с кодом `200`, а не создаёт вторую. Тот же ключ с другим
-телом даёт `409 idempotency_conflict`.
+телом даёт `409 idempotency_conflict`. Ключ вне формата UUID даёт `400
+invalid_request`.
+
+Ключи хранятся в таблице `idempotency_keys` вместе с датой создания и сейчас
+не удаляются: очистки по сроку нет, повтор с тем же ключом всегда возвращает
+ту же поездку.
 
 ## Архитектура
 
@@ -136,11 +141,11 @@ curl -i localhost:8080/ready
 
 ```
 cmd/trip-service/             main: читает конфиг, вызывает container.New и запускает результат
-api/                          код, сгенерированный из OpenAPI
 migrations/                   миграции goose
 internal/
   config/                     разбор и проверка переменных окружения
   container/                  создаёт все зависимости и связывает их вручную
+  generated/                  код, сгенерированный из OpenAPI (make generate)
   domain/trip/                поездка, статусы, правила, доменные ошибки
   model/                      структуры, которые ходят между слоями
   usecase/trip/{create,get,finish}/
@@ -201,8 +206,7 @@ internal/
 
 ### Отступления от примерной раскладки
 
-- `api/` и `migrations/` лежат в корне. Код из OpenAPI генерируется в `api/`
-  с первой работы, переносить его ради раскладки не стали.
+- `migrations/` лежит в корне репозитория, как и в первой работе.
 - Ключи идемпотентности хранит `repository/trip` рядом с поездками, отдельного
   пакета нет. `usecase` видит их через узкий интерфейс `idempotencyStore`,
   отдельный пакет ничего бы не добавил.
@@ -243,9 +247,13 @@ Middleware `Tracing` создаёт на каждый запрос корнев�
 | `db.client.operation.duration` | histogram | секунды | `db.operation.name`, `db.collection.name`, `error.type` |
 | `tripgo.trips.created` | counter | штуки | нет |
 | `tripgo.trips.completed` | counter | штуки | нет |
+| `tripgo.trips.active` | gauge | штуки | нет |
 
 В `http.route` всегда шаблон маршрута, без подставленного `tripId`. Счётчики
-`tripgo.trips.*` увеличиваются в `usecase` после успешного коммита. В
+`tripgo.trips.created` и `tripgo.trips.completed` увеличиваются в `usecase`
+после успешного коммита. Gauge `tripgo.trips.active` при каждом сборе метрик
+(раз в 10 секунд) считает активные поездки запросом `count(*)` в БД, поэтому
+после перезапуска сервиса значение остаётся верным. В
 Prometheus метрики видны как `http_server_request_duration_seconds` и
 `tripgo_trips_created_total`.
 
@@ -305,11 +313,19 @@ docker run --rm -p 8080:8080 --env-file .env trip-service
 ```
 
 Сборка двухэтапная: `golang:1.27-alpine` компилирует статический бинарник,
-в финальном образе на `alpine:3.20` лежит только он, без Go-тулчейна и
-исходников, процесс запускается от `nobody`. Если PostgreSQL поднят на
-хост-машине (как при локальной разработке через `tripgoctl`), значение
-`localhost` в `DATABASE_URL` внутри контейнера указывает на сам контейнер, а
-не на хост: замените его на `host.docker.internal`.
+в финальном образе на `gcr.io/distroless/static-debian12:nonroot` лежит только
+он, без Go-тулчейна, оболочки и исходников, процесс запускается от
+пользователя `nonroot`. Размер финального образа: 15.9 МБ в сжатом виде,
+52 МБ на диске (по выводу `docker images`).
+
+Если PostgreSQL поднят на хост-машине (как при локальной разработке через
+`tripgoctl`), значение `localhost` в `DATABASE_URL` внутри контейнера
+указывает на сам контейнер, а не на хост. Подставьте `host.docker.internal`:
+
+```bash
+docker run --rm -p 8080:8080 --env-file .env \
+  -e DATABASE_URL="${DATABASE_URL//localhost/host.docker.internal}" trip-service
+```
 
 ## Решения
 

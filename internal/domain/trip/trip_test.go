@@ -64,6 +64,8 @@ func TestNewValidation(t *testing.T) {
 		wantField string
 	}{
 		{name: "valid", userID: "u1", driverID: "d1", start: pointA, end: pointB, price: 100},
+		{name: "minimum bounds and zero price", userID: "u1", driverID: "d1", start: trip.Point{Latitude: -90, Longitude: -180}, end: pointB, price: 0},
+		{name: "maximum bounds", userID: "u1", driverID: "d1", start: pointA, end: trip.Point{Latitude: 90, Longitude: 180}, price: 100},
 		{name: "empty user", userID: "", driverID: "d1", start: pointA, end: pointB, price: 100, wantField: "user_id, driver_id"},
 		{name: "empty driver", userID: "u1", driverID: "", start: pointA, end: pointB, price: 100, wantField: "user_id, driver_id"},
 		{name: "start latitude out of range", userID: "u1", driverID: "d1", start: trip.Point{Latitude: 91}, end: pointB, price: 100, wantField: "start_point"},
@@ -85,4 +87,10 @@ func TestNewValidation(t *testing.T) {
 			require.Nil(t, tr)
 		})
 	}
+}
+
+func TestValidationErrorMessage(t *testing.T) {
+	err := &trip.ValidationError{Field: "start_point", Reason: "coordinates out of range"}
+
+	require.EqualError(t, err, "start_point: coordinates out of range")
 }

@@ -33,3 +33,22 @@ func (m *TripMetrics) TripCreated(ctx context.Context) {
 func (m *TripMetrics) TripCompleted(ctx context.Context) {
 	m.completed.Add(ctx, 1)
 }
+
+func RegisterActiveTrips(meter metric.Meter, count func(ctx context.Context) (int64, error)) error {
+	_, err := meter.Int64ObservableGauge("tripgo.trips.active",
+		metric.WithUnit("{trip}"),
+		metric.WithDescription("Number of trips in progress."),
+		metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
+			n, err := count(ctx)
+			if err != nil {
+				return fmt.Errorf("count active trips: %w", err)
+			}
+			o.Observe(n)
+			return nil
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("create trips.active gauge: %w", err)
+	}
+	return nil
+}

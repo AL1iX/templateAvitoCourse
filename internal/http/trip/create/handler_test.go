@@ -16,8 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
 	"github.com/AL1iX/templateAvitoCourse/internal/domain/trip"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/domainerror"
 	"github.com/AL1iX/templateAvitoCourse/internal/model"
 )
@@ -132,19 +132,19 @@ func TestHandle(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()
 
-			newHandler(uc).Handle(rec, req, api.CreateTripParams{})
+			newHandler(uc).Handle(rec, req, generated.CreateTripParams{})
 
 			require.Equal(t, tc.wantStatus, rec.Code)
 			require.NotContains(t, rec.Body.String(), "password")
 			if tc.wantCode != "" {
-				var problem api.Problem
+				var problem generated.Problem
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
 				require.Equal(t, tc.wantCode, problem.Code)
 				require.Contains(t, rec.Header().Get("Content-Type"), "application/problem+json")
 				return
 			}
 
-			var got api.Trip
+			var got generated.Trip
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 			require.Equal(t, tripID, got.Id.String())
 			require.Equal(t, tc.wantLocation, rec.Header().Get("Location") != "")
@@ -165,7 +165,7 @@ func TestHandleIdempotencyKey(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(body(userID)))
 	rec := httptest.NewRecorder()
 
-	newHandler(uc).Handle(rec, req, api.CreateTripParams{IdempotencyKey: &key})
+	newHandler(uc).Handle(rec, req, generated.CreateTripParams{IdempotencyKey: &key})
 
 	require.Equal(t, http.StatusConflict, rec.Code)
 }

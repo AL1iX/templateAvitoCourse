@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"github.com/AL1iX/templateAvitoCourse/api"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
 )
 
 func TestReady(t *testing.T) {
@@ -22,8 +22,8 @@ func TestReady(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{"database is up", nil, http.StatusOK, string(api.Ok)},
-		{"database is down", errors.New("connection refused"), http.StatusServiceUnavailable, string(api.Unavailable)},
+		{"database is up", nil, http.StatusOK, string(generated.Ok)},
+		{"database is down", errors.New("connection refused"), http.StatusServiceUnavailable, string(generated.Unavailable)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

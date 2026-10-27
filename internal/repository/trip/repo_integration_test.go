@@ -216,3 +216,23 @@ func TestIdempotencyStore(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, model.IdempotencyRecord{RequestHash: "hash-1", TripID: tripID}, rec)
 }
+
+func TestCountActive(t *testing.T) {
+	f := setup(t)
+
+	before, err := f.repo.CountActive(t.Context())
+	require.NoError(t, err)
+
+	tr := f.newTrip(t, uuid.NewString())
+	require.NoError(t, f.repo.Save(t.Context(), tr))
+
+	withTrip, err := f.repo.CountActive(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, before+1, withTrip)
+
+	require.NoError(t, f.finish(t.Context(), tr.ID()))
+
+	afterFinish, err := f.repo.CountActive(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, before, afterFinish)
+}
