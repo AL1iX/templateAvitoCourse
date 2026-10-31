@@ -95,6 +95,14 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params gene
 		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "user_id, driver_id, start_point, end_point and price are required")
 		return
 	}
+	if body.UserId == uuid.Nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "user_id must not be empty")
+		return
+	}
+	if body.DriverId == uuid.Nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "driver_id must not be empty")
+		return
+	}
 	if !validCoordinates(body.StartPoint) || !validCoordinates(body.EndPoint) {
 		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "coordinates out of range")
 		return
