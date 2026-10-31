@@ -55,6 +55,7 @@ func TestHandle(t *testing.T) {
 		setup        func(uc *MockuseCase)
 		wantStatus   int
 		wantCode     string
+		wantDetail   string
 		wantLocation bool
 	}{
 		{
@@ -88,6 +89,22 @@ func TestHandle(t *testing.T) {
 			setup:      func(*MockuseCase) {},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   codeInvalidRequest,
+		},
+		{
+			name:       "zero user id never reaches the usecase",
+			body:       strings.Replace(body(), userID, uuid.Nil.String(), 1),
+			setup:      func(*MockuseCase) {},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeInvalidRequest,
+			wantDetail: "user_id",
+		},
+		{
+			name:       "zero driver id never reaches the usecase",
+			body:       strings.Replace(body(), driverID, uuid.Nil.String(), 1),
+			setup:      func(*MockuseCase) {},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeInvalidRequest,
+			wantDetail: "driver_id",
 		},
 		{
 			name:       "second json object after the first is rejected",
@@ -160,6 +177,10 @@ func TestHandle(t *testing.T) {
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
 				require.Equal(t, tc.wantCode, problem.Code)
 				require.Contains(t, rec.Header().Get("Content-Type"), "application/problem+json")
+				if tc.wantDetail != "" {
+					require.NotNil(t, problem.Detail)
+					require.Contains(t, *problem.Detail, tc.wantDetail)
+				}
 				return
 			}
 

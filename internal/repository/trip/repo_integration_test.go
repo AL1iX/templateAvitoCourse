@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	domain "github.com/AL1iX/templateAvitoCourse/internal/domain/trip"
@@ -31,7 +32,12 @@ func setup(t *testing.T) fixture {
 	url := os.Getenv("DATABASE_URL")
 	require.NotEmpty(t, url, "DATABASE_URL must be set: run make test-integration, it loads .env")
 
-	pool, err := pgxpool.New(t.Context(), url)
+	poolConfig, err := pgxpool.ParseConfig(url)
+	require.NoError(t, err)
+	// The default pool size depends on the number of CPUs; the race test
+	// needs several connections at once.
+	poolConfig.MaxConns = 10
+	pool, err := pgxpool.NewWithConfig(t.Context(), poolConfig)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	require.NoError(t, pool.Ping(t.Context()))
@@ -283,12 +289,18 @@ func TestExpiredKeyIsAbsentAndCanBeReserved(t *testing.T) {
 	require.False(t, reserved, "the taken-over key is live again")
 }
 
+// TestConcurrentReserveOfExpiredKeyHasOneWinner synchronizes with channels and
+// with PostgreSQL itself, not with sleeps: the winner holds the row lock until
+// the test has seen every other Reserve blocked by the winner's backend.
 func TestConcurrentReserveOfExpiredKeyHasOneWinner(t *testing.T) {
 	f := setup(t)
+	// A long query timeout, so that it never expires while the others wait.
+	tx := transaction.New(f.pool, 30*time.Second)
+	repo := triprepo.New(tx, keyTTL)
 	key := uuid.NewString()
 	f.cleanupKey(t, key)
 
-	reserved, err := f.repo.Reserve(t.Context(), key, hashOld)
+	reserved, err := repo.Reserve(t.Context(), key, hashOld)
 	require.NoError(t, err)
 	require.True(t, reserved)
 	f.expireKey(t, key)
@@ -297,33 +309,69 @@ func TestConcurrentReserveOfExpiredKeyHasOneWinner(t *testing.T) {
 		won bool
 		err error
 	}
-	const workers = 5
-	results := make(chan result, workers)
-	for range workers {
+	var winnerPID int32
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	winner := make(chan result, 1)
+	go func() {
+		var won bool
+		err := tx.Do(t.Context(), func(ctx context.Context) error {
+			var err error
+			won, err = repo.Reserve(ctx, key, hashNew)
+			if err != nil || !won {
+				return err
+			}
+			if err := tx.Executor(ctx).QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&winnerPID); err != nil {
+				return err
+			}
+			close(locked)
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return nil
+		})
+		winner <- result{won: won, err: err}
+	}()
+
+	select {
+	case <-locked:
+	case res := <-winner:
+		require.NoError(t, res.err)
+		require.FailNow(t, "the winner did not take over the expired key")
+	}
+
+	const waiters = 4
+	results := make(chan result, waiters)
+	for range waiters {
 		go func() {
 			var won bool
-			err := f.tx.Do(t.Context(), func(ctx context.Context) error {
+			err := tx.Do(t.Context(), func(ctx context.Context) error {
 				var err error
-				won, err = f.repo.Reserve(ctx, key, hashNew)
-				if won {
-					// Hold the row lock so that the others really wait for it.
-					time.Sleep(100 * time.Millisecond)
-				}
+				won, err = repo.Reserve(ctx, key, hashNew)
 				return err
 			})
 			results <- result{won: won, err: err}
 		}()
 	}
 
-	var winners int
-	for range workers {
-		res := <-results
-		require.NoError(t, res.err)
-		if res.won {
-			winners++
-		}
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		var n int
+		err := f.pool.QueryRow(t.Context(),
+			"SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", winnerPID).Scan(&n)
+		require.NoError(c, err)
+		require.Equal(c, waiters, n)
+	}, 10*time.Second, 10*time.Millisecond, "the other Reserve calls must be blocked by the winner")
+	close(release)
+
+	res := <-winner
+	require.NoError(t, res.err)
+	require.True(t, res.won)
+	for range waiters {
+		other := <-results
+		require.NoError(t, other.err)
+		require.False(t, other.won, "the others see a live key after the winner commits")
 	}
-	require.Equal(t, 1, winners)
 }
 
 func TestDeleteExpiredKeysKeepsLiveKeys(t *testing.T) {

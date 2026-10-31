@@ -66,6 +66,12 @@ func toInput(raw []byte, params generated.CreateTripParams) (model.CreateTripInp
 			Field: bodyField, Reason: "user_id, driver_id, start_point, end_point and price are required",
 		}
 	}
+	if body.UserId == uuid.Nil {
+		return model.CreateTripInput{}, &trip.ValidationError{Field: "user_id", Reason: "must not be empty"}
+	}
+	if body.DriverId == uuid.Nil {
+		return model.CreateTripInput{}, &trip.ValidationError{Field: "driver_id", Reason: "must not be empty"}
+	}
 
 	in := model.CreateTripInput{
 		UserID:   body.UserId.String(),
