@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 
 	"github.com/google/uuid"
 
@@ -13,15 +15,56 @@ import (
 	"github.com/AL1iX/templateAvitoCourse/internal/model"
 )
 
+const bodyField = "body"
+
+// request mirrors generated.TripData with pointer fields so that a missing or
+// null field can be told apart from an explicit zero value.
+type request struct {
+	UserID     *uuid.UUID `json:"user_id"`
+	DriverID   *uuid.UUID `json:"driver_id"`
+	StartPoint *point     `json:"start_point"`
+	EndPoint   *point     `json:"end_point"`
+	Price      *int64     `json:"price"`
+}
+
+type point struct {
+	Latitude  *float64 `json:"latitude"`
+	Longitude *float64 `json:"longitude"`
+}
+
+// tripData returns the request as generated.TripData; ok is false when any
+// required field is missing or null.
+func (q request) tripData() (generated.TripData, bool) {
+	if q.UserID == nil || q.DriverID == nil || q.Price == nil ||
+		q.StartPoint == nil || q.StartPoint.Latitude == nil || q.StartPoint.Longitude == nil ||
+		q.EndPoint == nil || q.EndPoint.Latitude == nil || q.EndPoint.Longitude == nil {
+		return generated.TripData{}, false
+	}
+	return generated.TripData{
+		UserId:     *q.UserID,
+		DriverId:   *q.DriverID,
+		StartPoint: generated.Coordinates{Latitude: *q.StartPoint.Latitude, Longitude: *q.StartPoint.Longitude},
+		EndPoint:   generated.Coordinates{Latitude: *q.EndPoint.Latitude, Longitude: *q.EndPoint.Longitude},
+		Price:      *q.Price,
+	}, true
+}
+
 func toInput(raw []byte, params generated.CreateTripParams) (model.CreateTripInput, error) {
-	var body generated.TripData
+	var req request
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		return model.CreateTripInput{}, &trip.ValidationError{Field: "body", Reason: err.Error()}
+	if err := dec.Decode(&req); err != nil {
+		return model.CreateTripInput{}, &trip.ValidationError{Field: bodyField, Reason: err.Error()}
 	}
-	if body.UserId == uuid.Nil || body.DriverId == uuid.Nil {
-		return model.CreateTripInput{}, &trip.ValidationError{Field: "user_id, driver_id", Reason: "must not be empty"}
+	// Anything after the first JSON object other than whitespace is an error.
+	if err := dec.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
+		return model.CreateTripInput{}, &trip.ValidationError{Field: bodyField, Reason: "unexpected data after JSON object"}
+	}
+	body, ok := req.tripData()
+	if !ok {
+		return model.CreateTripInput{}, &trip.ValidationError{
+			Field: bodyField, Reason: "user_id, driver_id, start_point, end_point and price are required",
+		}
 	}
 
 	in := model.CreateTripInput{

@@ -16,7 +16,19 @@ const (
 	activeTripIndex     = "trips_one_active_per_driver_idx"
 )
 
+// Save and Update run two statements (the trip and its status history); each
+// statement gets its own query timeout.
 func (r *Repository) Save(ctx context.Context, t *domain.Trip) error {
+	if err := r.insertTrip(ctx, t); err != nil {
+		return err
+	}
+	return r.addHistory(ctx, t.ID(), nil, domain.StatusActive, "trip created")
+}
+
+func (r *Repository) insertTrip(ctx context.Context, t *domain.Trip) error {
+	ctx, cancel := r.db.WithTimeout(ctx)
+	defer cancel()
+
 	query, args, err := sq.Insert("trips").
 		Columns("id", "user_id", "driver_id", "start_latitude", "start_longitude",
 			"end_latitude", "end_longitude", "price", "status", "started_at").
@@ -35,11 +47,21 @@ func (r *Repository) Save(ctx context.Context, t *domain.Trip) error {
 		}
 		return fmt.Errorf("insert trip: %w", err)
 	}
-
-	return r.addHistory(ctx, t.ID(), nil, domain.StatusActive, "trip created")
+	return nil
 }
 
 func (r *Repository) Update(ctx context.Context, t *domain.Trip) error {
+	if err := r.updateTrip(ctx, t); err != nil {
+		return err
+	}
+	from := domain.StatusActive
+	return r.addHistory(ctx, t.ID(), &from, t.Status(), "trip finished")
+}
+
+func (r *Repository) updateTrip(ctx context.Context, t *domain.Trip) error {
+	ctx, cancel := r.db.WithTimeout(ctx)
+	defer cancel()
+
 	query, args, err := sq.Update("trips").
 		Set("status", string(t.Status())).
 		Set("finished_at", t.FinishedAt()).
@@ -58,12 +80,13 @@ func (r *Repository) Update(ctx context.Context, t *domain.Trip) error {
 	if tag.RowsAffected() == 0 {
 		return domain.ErrTripNotFound
 	}
-
-	from := domain.StatusActive
-	return r.addHistory(ctx, t.ID(), &from, t.Status(), "trip finished")
+	return nil
 }
 
 func (r *Repository) addHistory(ctx context.Context, tripID string, from *domain.Status, to domain.Status, reason string) error {
+	ctx, cancel := r.db.WithTimeout(ctx)
+	defer cancel()
+
 	var fromVal any
 	if from != nil {
 		fromVal = string(*from)

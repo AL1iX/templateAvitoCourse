@@ -28,6 +28,9 @@ const (
 	driverID = "33333333-3333-4333-8333-333333333333"
 
 	codeInvalidRequest = "invalid_request"
+
+	fieldStartPoint = "start_point"
+	fieldEndPoint   = "end_point"
 )
 
 func newHandler(uc *MockuseCase) *Handler {
@@ -35,8 +38,8 @@ func newHandler(uc *MockuseCase) *Handler {
 	return New(uc, domainerror.New(logger))
 }
 
-func body(user string) string {
-	return `{"user_id":"` + user + `","driver_id":"` + driverID +
+func body() string {
+	return `{"user_id":"` + userID + `","driver_id":"` + driverID +
 		`","start_point":{"latitude":56.8,"longitude":60.6},"end_point":{"latitude":56.9,"longitude":60.7},"price":500}`
 }
 
@@ -56,7 +59,7 @@ func TestHandle(t *testing.T) {
 	}{
 		{
 			name: "trip is created",
-			body: body(userID),
+			body: body(),
 			setup: func(uc *MockuseCase) {
 				uc.EXPECT().Execute(gomock.Any(), gomock.Any()).Return(model.CreateTripResult{Trip: created}, nil)
 			},
@@ -65,7 +68,7 @@ func TestHandle(t *testing.T) {
 		},
 		{
 			name: "replayed request",
-			body: body(userID),
+			body: body(),
 			setup: func(uc *MockuseCase) {
 				uc.EXPECT().Execute(gomock.Any(), gomock.Any()).
 					Return(model.CreateTripResult{Trip: created, Replayed: true}, nil)
@@ -81,21 +84,37 @@ func TestHandle(t *testing.T) {
 		},
 		{
 			name:       "unknown field",
-			body:       strings.Replace(body(userID), `"price":500`, `"price":500,"foo":1`, 1),
+			body:       strings.Replace(body(), `"price":500`, `"price":500,"foo":1`, 1),
 			setup:      func(*MockuseCase) {},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   codeInvalidRequest,
 		},
 		{
-			name:       "nil user id",
-			body:       body(uuid.Nil.String()),
+			name:       "second json object after the first is rejected",
+			body:       body() + body(),
 			setup:      func(*MockuseCase) {},
 			wantStatus: http.StatusBadRequest,
 			wantCode:   codeInvalidRequest,
+		},
+		{
+			name:       "garbage after the json object is rejected",
+			body:       body() + `}`,
+			setup:      func(*MockuseCase) {},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   codeInvalidRequest,
+		},
+		{
+			name: "trailing whitespace is allowed",
+			body: body() + " \n\t ",
+			setup: func(uc *MockuseCase) {
+				uc.EXPECT().Execute(gomock.Any(), gomock.Any()).Return(model.CreateTripResult{Trip: created}, nil)
+			},
+			wantStatus:   http.StatusCreated,
+			wantLocation: true,
 		},
 		{
 			name: "validation error from the domain",
-			body: body(userID),
+			body: body(),
 			setup: func(uc *MockuseCase) {
 				uc.EXPECT().Execute(gomock.Any(), gomock.Any()).
 					Return(model.CreateTripResult{}, &trip.ValidationError{Field: "price", Reason: "must not be negative"})
@@ -105,7 +124,7 @@ func TestHandle(t *testing.T) {
 		},
 		{
 			name: "driver is busy",
-			body: body(userID),
+			body: body(),
 			setup: func(uc *MockuseCase) {
 				uc.EXPECT().Execute(gomock.Any(), gomock.Any()).
 					Return(model.CreateTripResult{}, trip.ErrDriverBusy)
@@ -115,7 +134,7 @@ func TestHandle(t *testing.T) {
 		},
 		{
 			name: "repository error is a 500 without details",
-			body: body(userID),
+			body: body(),
 			setup: func(uc *MockuseCase) {
 				uc.EXPECT().Execute(gomock.Any(), gomock.Any()).
 					Return(model.CreateTripResult{}, errDB)
@@ -152,6 +171,84 @@ func TestHandle(t *testing.T) {
 	}
 }
 
+// TestHandleRejectsMissingOrNullFields removes or nulls every required field in
+// turn. The mock has no expectations, so a call to the usecase fails the test.
+func TestHandleRejectsMissingOrNullFields(t *testing.T) {
+	paths := [][]string{
+		{"user_id"},
+		{"driver_id"},
+		{"price"},
+		{fieldStartPoint},
+		{fieldStartPoint, "latitude"},
+		{fieldStartPoint, "longitude"},
+		{fieldEndPoint},
+		{fieldEndPoint, "latitude"},
+		{fieldEndPoint, "longitude"},
+	}
+
+	for _, path := range paths {
+		for _, null := range []bool{false, true} {
+			name := strings.Join(path, ".") + " missing"
+			if null {
+				name = strings.Join(path, ".") + " null"
+			}
+
+			t.Run(name, func(t *testing.T) {
+				var doc map[string]any
+				require.NoError(t, json.Unmarshal([]byte(body()), &doc))
+
+				parent := doc
+				if len(path) == 2 {
+					var ok bool
+					parent, ok = doc[path[0]].(map[string]any)
+					require.True(t, ok)
+				}
+				key := path[len(path)-1]
+				require.Contains(t, parent, key)
+				if null {
+					parent[key] = nil
+				} else {
+					delete(parent, key)
+				}
+				raw, err := json.Marshal(doc)
+				require.NoError(t, err)
+
+				uc := NewMockuseCase(gomock.NewController(t))
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(string(raw)))
+				rec := httptest.NewRecorder()
+
+				newHandler(uc).Handle(rec, req, generated.CreateTripParams{})
+
+				require.Equal(t, http.StatusBadRequest, rec.Code)
+				var problem generated.Problem
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+				require.Equal(t, codeInvalidRequest, problem.Code)
+			})
+		}
+	}
+}
+
+func TestHandleExplicitZeroValuesAreValid(t *testing.T) {
+	const zeroBody = `{"user_id":"` + userID + `","driver_id":"` + driverID +
+		`","start_point":{"latitude":0,"longitude":0},"end_point":{"latitude":0,"longitude":0},"price":0}`
+
+	uc := NewMockuseCase(gomock.NewController(t))
+	uc.EXPECT().Execute(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, in model.CreateTripInput) (model.CreateTripResult, error) {
+			require.Zero(t, in.Price)
+			require.Equal(t, trip.Point{}, in.Start)
+			require.Equal(t, trip.Point{}, in.End)
+			return model.CreateTripResult{}, trip.ErrDriverBusy
+		})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(zeroBody))
+	rec := httptest.NewRecorder()
+
+	newHandler(uc).Handle(rec, req, generated.CreateTripParams{})
+
+	require.Equal(t, http.StatusConflict, rec.Code, "request passed validation and reached the usecase")
+}
+
 func TestHandleIdempotencyKey(t *testing.T) {
 	key := uuid.New()
 	uc := NewMockuseCase(gomock.NewController(t))
@@ -162,7 +259,7 @@ func TestHandleIdempotencyKey(t *testing.T) {
 			return model.CreateTripResult{}, trip.ErrIdempotencyConflict
 		})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(body(userID)))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/trips", strings.NewReader(body()))
 	rec := httptest.NewRecorder()
 
 	newHandler(uc).Handle(rec, req, generated.CreateTripParams{IdempotencyKey: &key})

@@ -27,11 +27,15 @@ import (
 	getuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/trip/get"
 )
 
-const instrumentationName = "github.com/AL1iX/templateAvitoCourse"
+const (
+	instrumentationName        = "github.com/AL1iX/templateAvitoCourse"
+	idempotencyCleanupInterval = time.Hour
+)
 
 type Container struct {
 	server          *http.Server
 	pool            *pgxpool.Pool
+	tripRepo        *triprepo.Repository
 	telemetry       *telemetry.Telemetry
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
@@ -66,15 +70,10 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 		return nil, fmt.Errorf("connect database: %w", err)
 	}
 
-	txManager := transaction.New(pool)
-	tripRepo := triprepo.New(txManager)
+	txManager := transaction.New(pool, cfg.DatabaseQueryTimeout)
+	tripRepo := triprepo.New(txManager, cfg.IdempotencyKeyTTL)
 
-	err = telemetry.RegisterActiveTrips(tel.MeterProvider.Meter(instrumentationName),
-		func(ctx context.Context) (int64, error) {
-			ctx, cancel := context.WithTimeout(ctx, cfg.DatabaseQueryTimeout)
-			defer cancel()
-			return tripRepo.CountActive(ctx)
-		})
+	err = telemetry.RegisterActiveTrips(tel.MeterProvider.Meter(instrumentationName), tripRepo.CountActive)
 	if err != nil {
 		pool.Close()
 		return nil, err
@@ -107,6 +106,7 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 			IdleTimeout:       cfg.HTTPIdleTimeout,
 		},
 		pool:            pool,
+		tripRepo:        tripRepo,
 		telemetry:       tel,
 		logger:          logger,
 		shutdownTimeout: cfg.ShutdownTimeout,
@@ -114,6 +114,12 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 }
 
 func (c *Container) Run(ctx context.Context) error {
+	// The cleanup stops when Run returns, including when the server fails
+	// to start while ctx is still alive.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go c.cleanupExpiredKeys(ctx)
+
 	errCh := make(chan error, 1)
 	go func() {
 		c.logger.Info("http server starting", "addr", c.server.Addr)
@@ -137,6 +143,32 @@ func (c *Container) Run(ctx context.Context) error {
 	}
 	c.logger.Info("http server stopped")
 	return nil
+}
+
+// cleanupExpiredKeys deletes expired idempotency keys at start and then every
+// idempotencyCleanupInterval until ctx is cancelled. Correctness does not
+// depend on it: expired keys are already ignored on read.
+func (c *Container) cleanupExpiredKeys(ctx context.Context) {
+	ticker := time.NewTicker(idempotencyCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		n, err := c.tripRepo.DeleteExpiredKeys(ctx)
+		switch {
+		case ctx.Err() != nil:
+			return
+		case err != nil:
+			c.logger.Error("idempotency cleanup failed", "error", err)
+		case n > 0:
+			c.logger.Info("expired idempotency keys deleted", "count", n)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func (c *Container) Close() {

@@ -10,6 +10,9 @@ import (
 )
 
 func (r *Repository) CountActive(ctx context.Context) (int64, error) {
+	ctx, cancel := r.db.WithTimeout(ctx)
+	defer cancel()
+
 	query, args, err := sq.Select("count(*)").From("trips").
 		Where(sq.Eq{"status": string(domain.StatusActive)}).
 		PlaceholderFormat(sq.Dollar).

@@ -26,6 +26,9 @@ func (r *Repository) GetForUpdate(ctx context.Context, id string) (*domain.Trip,
 }
 
 func (r *Repository) fetch(ctx context.Context, id string, lock bool) (*domain.Trip, error) {
+	ctx, cancel := r.db.WithTimeout(ctx)
+	defer cancel()
+
 	builder := sq.Select(tripColumns...).From("trips").
 		Where(sq.Eq{"id": id}).
 		PlaceholderFormat(sq.Dollar)

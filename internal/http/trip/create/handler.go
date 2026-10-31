@@ -21,7 +21,7 @@ func New(uc useCase, errw errorWriter) *Handler {
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request, params generated.CreateTripParams) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		h.errw.Write(w, r, &trip.ValidationError{Field: "body", Reason: err.Error()})
+		h.errw.Write(w, r, &trip.ValidationError{Field: bodyField, Reason: err.Error()})
 		return
 	}
 

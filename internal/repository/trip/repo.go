@@ -1,9 +1,13 @@
 package trip
 
+import "time"
+
 type Repository struct {
-	db executorProvider
+	db     executorProvider
+	keyTTL time.Duration
 }
 
-func New(db executorProvider) *Repository {
-	return &Repository{db: db}
+// New returns a repository whose idempotency keys stay live for keyTTL.
+func New(db executorProvider, keyTTL time.Duration) *Repository {
+	return &Repository{db: db, keyTTL: keyTTL}
 }

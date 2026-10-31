@@ -8,4 +8,5 @@ import (
 
 type executorProvider interface {
 	Executor(ctx context.Context) transaction.Executor
+	WithTimeout(ctx context.Context) (context.Context, context.CancelFunc)
 }
