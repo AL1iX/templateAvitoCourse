@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/AL1iX/templateAvitoCourse/internal/config"
 	"github.com/AL1iX/templateAvitoCourse/internal/generated"
@@ -19,6 +20,8 @@ import (
 	"github.com/AL1iX/templateAvitoCourse/internal/txmanager"
 	"github.com/go-chi/chi/v5"
 )
+
+const idempotencyCleanupInterval = time.Hour
 
 func main() {
 	cfg, err := config.Load()
@@ -39,9 +42,11 @@ func main() {
 	}
 	defer pool.Close()
 
-	tripTxManager := txmanager.New(pool)
+	tripTxManager := txmanager.New(pool, cfg.DatabaseQueryTimeout)
 	tripRepo := trip.NewRepository(tripTxManager)
-	idemRepo := idempotency.NewRepository(tripTxManager)
+	idemRepo := idempotency.NewRepository(tripTxManager, cfg.IdempotencyKeyTTL)
+
+	go idemRepo.RunCleanup(ctx, idempotencyCleanupInterval, logger)
 
 	handler := httpapi.NewHandler(pool, logger, cfg, tripTxManager, tripRepo, idemRepo)
 

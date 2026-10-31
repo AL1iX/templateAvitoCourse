@@ -78,6 +78,32 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params gene
 		return
 	}
 
+	var req createTripRequest
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: "+err.Error())
+		return
+	}
+	// Anything after the first JSON object other than whitespace is an error.
+	if err := dec.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: unexpected data after JSON object")
+		return
+	}
+	body, ok := req.tripData()
+	if !ok {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "user_id, driver_id, start_point, end_point and price are required")
+		return
+	}
+	if !validCoordinates(body.StartPoint) || !validCoordinates(body.EndPoint) {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "coordinates out of range")
+		return
+	}
+	if body.Price < 0 {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "price must not be negative")
+		return
+	}
+
 	var idempotencyKey, requestHash string
 	if params.IdempotencyKey != nil {
 		idempotencyKey = params.IdempotencyKey.String()
@@ -93,26 +119,6 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params gene
 			writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
 			return
 		}
-	}
-
-	var body generated.TripData
-	dec := json.NewDecoder(bytes.NewReader(rawBody))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&body); err != nil {
-		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: "+err.Error())
-		return
-	}
-	if body.UserId == uuid.Nil || body.DriverId == uuid.Nil {
-		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "user_id and driver_id are required")
-		return
-	}
-	if !validCoordinates(body.StartPoint) || !validCoordinates(body.EndPoint) {
-		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "coordinates out of range")
-		return
-	}
-	if body.Price < 0 {
-		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "price must not be negative")
-		return
 	}
 
 	t := trip.Trip{
@@ -174,6 +180,38 @@ func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params gene
 
 	w.Header().Set("Location", "/api/v1/trips/"+t.ID)
 	writeJSON(w, http.StatusCreated, toAPITrip(t))
+}
+
+// createTripRequest mirrors generated.TripData with pointer fields so that a
+// missing or null field can be told apart from an explicit zero value.
+type createTripRequest struct {
+	UserID     *uuid.UUID          `json:"user_id"`
+	DriverID   *uuid.UUID          `json:"driver_id"`
+	StartPoint *coordinatesRequest `json:"start_point"`
+	EndPoint   *coordinatesRequest `json:"end_point"`
+	Price      *int64              `json:"price"`
+}
+
+type coordinatesRequest struct {
+	Latitude  *float64 `json:"latitude"`
+	Longitude *float64 `json:"longitude"`
+}
+
+// tripData returns the request as generated.TripData; ok is false when any
+// required field is missing or null.
+func (q createTripRequest) tripData() (generated.TripData, bool) {
+	if q.UserID == nil || q.DriverID == nil || q.Price == nil ||
+		q.StartPoint == nil || q.StartPoint.Latitude == nil || q.StartPoint.Longitude == nil ||
+		q.EndPoint == nil || q.EndPoint.Latitude == nil || q.EndPoint.Longitude == nil {
+		return generated.TripData{}, false
+	}
+	return generated.TripData{
+		UserId:     *q.UserID,
+		DriverId:   *q.DriverID,
+		StartPoint: generated.Coordinates{Latitude: *q.StartPoint.Latitude, Longitude: *q.StartPoint.Longitude},
+		EndPoint:   generated.Coordinates{Latitude: *q.EndPoint.Latitude, Longitude: *q.EndPoint.Longitude},
+		Price:      *q.Price,
+	}, true
 }
 
 func (h *Handler) respondIdempotent(w http.ResponseWriter, r *http.Request, existing idempotency.Record, requestHash string) {

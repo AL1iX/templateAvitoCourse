@@ -1,10 +1,12 @@
 .PHONY: migrate run test generate
 
+LOAD_ENV = set -a; [ ! -f .env ] || . ./.env; set +a;
+
 migrate:
-	go tool goose -dir ./migrations postgres "$$DATABASE_URL" up
+	$(LOAD_ENV) go tool goose -dir ./migrations postgres "$$DATABASE_URL" up
 
 run:
-	go run ./cmd/trip-service
+	$(LOAD_ENV) go run ./cmd/trip-service
 
 test:
 	go test -race ./...

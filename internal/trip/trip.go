@@ -50,6 +50,8 @@ func NewRepository(tx *txmanager.TxManager) *Repository {
 }
 
 func (r *Repository) Create(ctx context.Context, t Trip) error {
+	ctx, cancel := r.tx.WithTimeout(ctx)
+	defer cancel()
 	exec := r.tx.Executor(ctx)
 
 	query, args, err := sq.Insert("trips").
@@ -74,6 +76,8 @@ func (r *Repository) Create(ctx context.Context, t Trip) error {
 }
 
 func (r *Repository) AddStatusHistory(ctx context.Context, tripID string, from *Status, to Status, reason string) error {
+	ctx, cancel := r.tx.WithTimeout(ctx)
+	defer cancel()
 	exec := r.tx.Executor(ctx)
 
 	var fromVal any
@@ -95,6 +99,8 @@ func (r *Repository) AddStatusHistory(ctx context.Context, tripID string, from *
 }
 
 func (r *Repository) GetByID(ctx context.Context, id string) (Trip, error) {
+	ctx, cancel := r.tx.WithTimeout(ctx)
+	defer cancel()
 	exec := r.tx.Executor(ctx)
 
 	query, args, err := sq.Select(
@@ -121,7 +127,11 @@ func (r *Repository) GetByID(ctx context.Context, id string) (Trip, error) {
 }
 
 func (r *Repository) Finish(ctx context.Context, id string, finishedAt time.Time) error {
-	exec := r.tx.Executor(ctx)
+	// The UPDATE gets its own deadline; the follow-up GetByID below uses the
+	// caller's ctx and therefore gets its own full timeout.
+	opCtx, cancel := r.tx.WithTimeout(ctx)
+	defer cancel()
+	exec := r.tx.Executor(opCtx)
 
 	query, args, err := sq.Update("trips").
 		Set("status", string(StatusCompleted)).
@@ -134,7 +144,7 @@ func (r *Repository) Finish(ctx context.Context, id string, finishedAt time.Time
 		return err
 	}
 
-	tag, err := exec.Exec(ctx, query, args...)
+	tag, err := exec.Exec(opCtx, query, args...)
 	if err != nil {
 		return err
 	}

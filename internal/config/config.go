@@ -20,6 +20,8 @@ type Config struct {
 	DatabaseConnectTimeout  time.Duration
 	DatabaseQueryTimeout    time.Duration
 
+	IdempotencyKeyTTL time.Duration
+
 	HTTPReadTimeout       time.Duration
 	HTTPReadHeaderTimeout time.Duration
 	HTTPWriteTimeout      time.Duration
@@ -94,6 +96,18 @@ func Load() (Config, error) {
 	cfg.DatabaseQueryTimeout, err = requireDuration("DATABASE_QUERY_TIMEOUT")
 	if err != nil {
 		return Config{}, err
+	}
+
+	if cfg.DatabaseQueryTimeout <= 0 {
+		return Config{}, fmt.Errorf("DATABASE_QUERY_TIMEOUT (%s) must be positive", cfg.DatabaseQueryTimeout)
+	}
+
+	cfg.IdempotencyKeyTTL, err = optionalDuration("IDEMPOTENCY_KEY_TTL", 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.IdempotencyKeyTTL <= 0 {
+		return Config{}, fmt.Errorf("IDEMPOTENCY_KEY_TTL (%s) must be positive", cfg.IdempotencyKeyTTL)
 	}
 
 	if cfg.DatabaseMinConns > cfg.DatabaseMaxConns {

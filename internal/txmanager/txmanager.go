@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,11 +22,19 @@ type Executor interface {
 }
 
 type TxManager struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	queryTimeout time.Duration
 }
 
-func New(pool *pgxpool.Pool) *TxManager {
-	return &TxManager{pool: pool}
+func New(pool *pgxpool.Pool, queryTimeout time.Duration) *TxManager {
+	return &TxManager{pool: pool, queryTimeout: queryTimeout}
+}
+
+// WithTimeout limits one database operation to the configured query timeout.
+// The deadline is derived from ctx, so it never outlives the request or the
+// surrounding transaction.
+func (m *TxManager) WithTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, m.queryTimeout)
 }
 
 func (m *TxManager) Executor(ctx context.Context) Executor {
@@ -34,14 +43,17 @@ func (m *TxManager) Executor(ctx context.Context) Executor {
 	}
 	return m.pool
 }
+
 func (m *TxManager) Do(ctx context.Context, fn func(ctx context.Context) error) error {
 	if _, alreadyInTx := ctx.Value(txKey).(pgx.Tx); alreadyInTx {
 		return fn(ctx)
 	}
 
-	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{
+	beginCtx, cancelBegin := m.WithTimeout(ctx)
+	tx, err := m.pool.BeginTx(beginCtx, pgx.TxOptions{
 		IsoLevel: pgx.ReadCommitted,
 	})
+	cancelBegin()
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
@@ -50,20 +62,30 @@ func (m *TxManager) Do(ctx context.Context, fn func(ctx context.Context) error) 
 
 	defer func() {
 		if r := recover(); r != nil {
-			_ = tx.Rollback(ctx)
+			_ = m.rollback(ctx, tx)
 			panic(r)
 		}
 	}()
 
 	if err := fn(txCtx); err != nil {
-		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			return fmt.Errorf("rollback after %v: %w", err, rbErr)
+		if rbErr := m.rollback(ctx, tx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			return fmt.Errorf("rollback after %w: %w", err, rbErr)
 		}
 		return err
 	}
 
-	if err := tx.Commit(ctx); err != nil {
+	commitCtx, cancelCommit := m.WithTimeout(ctx)
+	defer cancelCommit()
+	if err := tx.Commit(commitCtx); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
 	return nil
+}
+
+// rollback runs under its own timeout and ignores cancellation of ctx, so a
+// cancelled request still releases the transaction.
+func (m *TxManager) rollback(ctx context.Context, tx pgx.Tx) error {
+	rbCtx, cancel := m.WithTimeout(context.WithoutCancel(ctx))
+	defer cancel()
+	return tx.Rollback(rbCtx)
 }
