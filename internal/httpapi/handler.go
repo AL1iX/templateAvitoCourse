@@ -1,0 +1,335 @@
+package httpapi
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/AL1iX/templateAvitoCourse/internal/config"
+	"github.com/AL1iX/templateAvitoCourse/internal/generated"
+	"github.com/AL1iX/templateAvitoCourse/internal/idempotency"
+	"github.com/AL1iX/templateAvitoCourse/internal/trip"
+	"github.com/AL1iX/templateAvitoCourse/internal/txmanager"
+)
+
+type Handler struct {
+	generated.Unimplemented
+
+	pool   *pgxpool.Pool
+	logger *slog.Logger
+	cfg    config.Config
+
+	tx   *txmanager.TxManager
+	trip *trip.Repository
+	idem *idempotency.Repository
+}
+
+func NewHandler(pool *pgxpool.Pool, logger *slog.Logger, cfg config.Config, tx *txmanager.TxManager, tripRepo *trip.Repository, idemRepo *idempotency.Repository) *Handler {
+	return &Handler{pool: pool, logger: logger, cfg: cfg, tx: tx, trip: tripRepo, idem: idemRepo}
+}
+
+func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	writeHealth(w, http.StatusOK, generated.Ok)
+}
+
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), h.cfg.DatabaseConnectTimeout)
+	defer cancel()
+
+	if err := h.pool.Ping(ctx); err != nil {
+		h.logger.Warn("readiness check failed", "error", err)
+		writeHealth(w, http.StatusServiceUnavailable, generated.Unavailable)
+		return
+	}
+	writeHealth(w, http.StatusOK, generated.Ok)
+}
+
+func writeHealth(w http.ResponseWriter, status int, value generated.HealthResponseStatus) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(`{"status":"` + string(value) + `"}`))
+}
+
+const (
+	typeInvalidRequest      = "https://tripgo.example/problems/invalid-request"
+	typeTripNotFound        = "https://tripgo.example/problems/trip-not-found"
+	typeTripCompleted       = "https://tripgo.example/problems/trip-completed"
+	typeDriverBusy          = "https://tripgo.example/problems/driver-busy"
+	typeIdempotencyConflict = "https://tripgo.example/problems/idempotency-conflict"
+	typeInternalError       = "https://tripgo.example/problems/internal-error"
+)
+
+var errIdempotencyRace = errors.New("idempotency key claimed by a concurrent request")
+
+func (h *Handler) CreateTrip(w http.ResponseWriter, r *http.Request, params generated.CreateTripParams) {
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: "+err.Error())
+		return
+	}
+
+	var req createTripRequest
+	dec := json.NewDecoder(bytes.NewReader(rawBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: "+err.Error())
+		return
+	}
+	// Anything after the first JSON object other than whitespace is an error.
+	if err := dec.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "request body: unexpected data after JSON object")
+		return
+	}
+	body, ok := req.tripData()
+	if !ok {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "user_id, driver_id, start_point, end_point and price are required")
+		return
+	}
+	if body.UserId == uuid.Nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "user_id must not be empty")
+		return
+	}
+	if body.DriverId == uuid.Nil {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "driver_id must not be empty")
+		return
+	}
+	if !validCoordinates(body.StartPoint) || !validCoordinates(body.EndPoint) {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "coordinates out of range")
+		return
+	}
+	if body.Price < 0 {
+		writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", "price must not be negative")
+		return
+	}
+
+	var idempotencyKey, requestHash string
+	if params.IdempotencyKey != nil {
+		idempotencyKey = params.IdempotencyKey.String()
+		requestHash = hashRequestBody(rawBody)
+
+		existing, getErr := h.idem.Get(r.Context(), idempotencyKey)
+		switch {
+		case getErr == nil:
+			h.respondIdempotent(w, r, existing, requestHash)
+			return
+		case !errors.Is(getErr, idempotency.ErrNotFound):
+			h.logger.Error("idempotency lookup failed", "error", getErr)
+			writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+			return
+		}
+	}
+
+	t := trip.Trip{
+		ID:             uuid.New().String(),
+		UserID:         body.UserId.String(),
+		DriverID:       body.DriverId.String(),
+		StartLatitude:  body.StartPoint.Latitude,
+		StartLongitude: body.StartPoint.Longitude,
+		EndLatitude:    body.EndPoint.Latitude,
+		EndLongitude:   body.EndPoint.Longitude,
+		Price:          body.Price,
+		Status:         trip.StatusActive,
+		StartedAt:      time.Now().UTC(),
+	}
+
+	err = h.tx.Do(r.Context(), func(ctx context.Context) error {
+		if idempotencyKey != "" {
+			reserved, err := h.idem.Reserve(ctx, idempotencyKey, requestHash)
+			if err != nil {
+				return err
+			}
+			if !reserved {
+				return errIdempotencyRace
+			}
+		}
+		if err := h.trip.Create(ctx, t); err != nil {
+			return err
+		}
+		if err := h.trip.AddStatusHistory(ctx, t.ID, nil, trip.StatusActive, "trip created"); err != nil {
+			return err
+		}
+		if idempotencyKey != "" {
+			responseBody, err := json.Marshal(toAPITrip(t))
+			if err != nil {
+				return err
+			}
+			return h.idem.Fill(ctx, idempotencyKey, responseBody)
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errIdempotencyRace):
+		existing, getErr := h.idem.Get(r.Context(), idempotencyKey)
+		if getErr != nil {
+			h.logger.Error("idempotency lookup after race failed", "error", getErr)
+			writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+			return
+		}
+		h.respondIdempotent(w, r, existing, requestHash)
+		return
+	case errors.Is(err, trip.ErrDriverBusy):
+		writeProblem(w, r, http.StatusConflict, typeDriverBusy, "driver_busy", "Driver busy", "driver already has an active trip")
+		return
+	case err != nil:
+		h.logger.Error("create trip failed", "error", err)
+		writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+		return
+	}
+
+	w.Header().Set("Location", "/api/v1/trips/"+t.ID)
+	writeJSON(w, http.StatusCreated, toAPITrip(t))
+}
+
+// createTripRequest mirrors generated.TripData with pointer fields so that a
+// missing or null field can be told apart from an explicit zero value.
+type createTripRequest struct {
+	UserID     *uuid.UUID          `json:"user_id"`
+	DriverID   *uuid.UUID          `json:"driver_id"`
+	StartPoint *coordinatesRequest `json:"start_point"`
+	EndPoint   *coordinatesRequest `json:"end_point"`
+	Price      *int64              `json:"price"`
+}
+
+type coordinatesRequest struct {
+	Latitude  *float64 `json:"latitude"`
+	Longitude *float64 `json:"longitude"`
+}
+
+// tripData returns the request as generated.TripData; ok is false when any
+// required field is missing or null.
+func (q createTripRequest) tripData() (generated.TripData, bool) {
+	if q.UserID == nil || q.DriverID == nil || q.Price == nil ||
+		q.StartPoint == nil || q.StartPoint.Latitude == nil || q.StartPoint.Longitude == nil ||
+		q.EndPoint == nil || q.EndPoint.Latitude == nil || q.EndPoint.Longitude == nil {
+		return generated.TripData{}, false
+	}
+	return generated.TripData{
+		UserId:     *q.UserID,
+		DriverId:   *q.DriverID,
+		StartPoint: generated.Coordinates{Latitude: *q.StartPoint.Latitude, Longitude: *q.StartPoint.Longitude},
+		EndPoint:   generated.Coordinates{Latitude: *q.EndPoint.Latitude, Longitude: *q.EndPoint.Longitude},
+		Price:      *q.Price,
+	}, true
+}
+
+func (h *Handler) respondIdempotent(w http.ResponseWriter, r *http.Request, existing idempotency.Record, requestHash string) {
+	if existing.RequestHash != requestHash {
+		writeProblem(w, r, http.StatusConflict, typeIdempotencyConflict, "idempotency_conflict", "Idempotency conflict", "Idempotency-Key was already used with a different request body")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(existing.ResponseBody)
+}
+
+func hashRequestBody(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func (h *Handler) GetTrip(w http.ResponseWriter, r *http.Request, tripId generated.TripId) {
+	t, err := h.trip.GetByID(r.Context(), tripId.String())
+	switch {
+	case errors.Is(err, trip.ErrNotFound):
+		writeProblem(w, r, http.StatusNotFound, typeTripNotFound, "trip_not_found", "Trip not found", "")
+		return
+	case err != nil:
+		h.logger.Error("get trip failed", "error", err)
+		writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, toAPITrip(t))
+}
+
+func (h *Handler) FinishTrip(w http.ResponseWriter, r *http.Request, tripId generated.TripId) {
+	id := tripId.String()
+	now := time.Now().UTC()
+
+	err := h.tx.Do(r.Context(), func(ctx context.Context) error {
+		if err := h.trip.Finish(ctx, id, now); err != nil {
+			return err
+		}
+		from := trip.StatusActive
+		return h.trip.AddStatusHistory(ctx, id, &from, trip.StatusCompleted, "trip finished")
+	})
+	switch {
+	case errors.Is(err, trip.ErrNotFound):
+		writeProblem(w, r, http.StatusNotFound, typeTripNotFound, "trip_not_found", "Trip not found", "")
+		return
+	case errors.Is(err, trip.ErrCompleted):
+		writeProblem(w, r, http.StatusConflict, typeTripCompleted, "trip_completed", "Trip already completed", "")
+		return
+	case err != nil:
+		h.logger.Error("finish trip failed", "error", err)
+		writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+		return
+	}
+
+	t, err := h.trip.GetByID(r.Context(), id)
+	if err != nil {
+		h.logger.Error("reload finished trip failed", "error", err)
+		writeProblem(w, r, http.StatusInternalServerError, typeInternalError, "internal_error", "Internal error", "")
+		return
+	}
+	writeJSON(w, http.StatusOK, toAPITrip(t))
+}
+
+func validCoordinates(c generated.Coordinates) bool {
+	return c.Latitude >= -90 && c.Latitude <= 90 && c.Longitude >= -180 && c.Longitude <= 180
+}
+
+func toAPITrip(t trip.Trip) generated.Trip {
+	return generated.Trip{
+		Id:         uuid.MustParse(t.ID),
+		UserId:     uuid.MustParse(t.UserID),
+		DriverId:   uuid.MustParse(t.DriverID),
+		StartPoint: generated.Coordinates{Latitude: t.StartLatitude, Longitude: t.StartLongitude},
+		EndPoint:   generated.Coordinates{Latitude: t.EndLatitude, Longitude: t.EndLongitude},
+		Price:      t.Price,
+		Status:     generated.TripStatus(t.Status),
+		StartedAt:  t.StartedAt,
+		FinishedAt: t.FinishedAt,
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeProblem(w http.ResponseWriter, r *http.Request, status int, problemType, code, title, detail string) {
+	instance := r.URL.Path
+	p := generated.Problem{
+		Type:     problemType,
+		Title:    title,
+		Status:   int32(status),
+		Code:     code,
+		Instance: &instance,
+	}
+	if detail != "" {
+		p.Detail = &detail
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(p)
+}
+
+func (h *Handler) BadParameter(w http.ResponseWriter, r *http.Request, err error) {
+	detail := "invalid parameter"
+	var invalid *generated.InvalidParamFormatError
+	if errors.As(err, &invalid) {
+		detail = invalid.ParamName + ": invalid format"
+	}
+	writeProblem(w, r, http.StatusBadRequest, typeInvalidRequest, "invalid_request", "Invalid request", detail)
+}
