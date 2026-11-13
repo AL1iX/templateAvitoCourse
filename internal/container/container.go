@@ -14,6 +14,8 @@ import (
 	"github.com/AL1iX/templateAvitoCourse/internal/http/domainerror"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/health"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/middleware"
+	listposhttp "github.com/AL1iX/templateAvitoCourse/internal/http/position/list"
+	saveposhttp "github.com/AL1iX/templateAvitoCourse/internal/http/position/save"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/router"
 	createhttp "github.com/AL1iX/templateAvitoCourse/internal/http/trip/create"
 	finishhttp "github.com/AL1iX/templateAvitoCourse/internal/http/trip/finish"
@@ -22,6 +24,8 @@ import (
 	"github.com/AL1iX/templateAvitoCourse/internal/infra/postgres/transaction"
 	"github.com/AL1iX/templateAvitoCourse/internal/infra/telemetry"
 	triprepo "github.com/AL1iX/templateAvitoCourse/internal/repository/trip"
+	listposuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/position/list"
+	saveposuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/position/save"
 	createuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/trip/create"
 	finishuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/trip/finish"
 	getuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/trip/get"
@@ -82,12 +86,16 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 	createUC := createuc.New(tripRepo, tripRepo, txManager, m.trips, logger)
 	getUC := getuc.New(tripRepo)
 	finishUC := finishuc.New(tripRepo, txManager, m.trips, logger)
+	savePositionUC := saveposuc.New(tripRepo, txManager, m.trips)
+	listPositionsUC := listposuc.New(tripRepo, tripRepo)
 
 	errMapper := domainerror.New(logger)
 	handler := router.New(
 		createhttp.New(createUC, errMapper),
 		gethttp.New(getUC, errMapper),
 		finishhttp.New(finishUC, errMapper),
+		saveposhttp.New(savePositionUC, errMapper),
+		listposhttp.New(listPositionsUC, errMapper),
 		health.New(pool, cfg.DatabaseConnectTimeout, logger),
 		errMapper,
 		middleware.Recover(errMapper),
