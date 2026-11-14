@@ -94,3 +94,14 @@ func TestValidationErrorMessage(t *testing.T) {
 
 	require.EqualError(t, err, "start_point: coordinates out of range")
 }
+
+func TestRestoreKeepsLastPositionAt(t *testing.T) {
+	at := startedAt.Add(time.Minute)
+
+	with := trip.Restore("t1", "u1", "d1", pointA, pointB, 100, trip.StatusActive, startedAt, nil, &at)
+	without := trip.Restore("t1", "u1", "d1", pointA, pointB, 100, trip.StatusActive, startedAt, nil, nil)
+
+	require.Equal(t, &at, with.LastPositionAt())
+	require.Nil(t, without.LastPositionAt())
+	require.Nil(t, newTrip(t).LastPositionAt(), "a new trip has no positions yet")
+}

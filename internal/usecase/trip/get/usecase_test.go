@@ -14,7 +14,7 @@ import (
 
 func TestExecute(t *testing.T) {
 	found := trip.Restore("t1", "u1", "d1", trip.Point{}, trip.Point{}, 100,
-		trip.StatusActive, time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC), nil)
+		trip.StatusActive, time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC), nil, nil)
 	errDB := errors.New("db down")
 
 	tests := []struct {

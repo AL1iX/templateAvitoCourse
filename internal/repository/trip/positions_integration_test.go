@@ -62,10 +62,9 @@ func (f fixture) mustSavePosition(t *testing.T, tripID string, recordedAt time.T
 func (f fixture) lastPositionAt(t *testing.T, tripID string) *time.Time {
 	t.Helper()
 
-	var at *time.Time
-	err := f.pool.QueryRow(t.Context(), "SELECT last_position_at FROM trips WHERE id = $1", tripID).Scan(&at)
+	got, err := f.repo.GetByID(t.Context(), tripID)
 	require.NoError(t, err)
-	return at
+	return got.LastPositionAt()
 }
 
 func (f fixture) positionCount(t *testing.T, tripID string) int {
@@ -82,6 +81,7 @@ func requireSameTime(t *testing.T, want time.Time, got *time.Time) {
 
 	require.NotNil(t, got)
 	require.True(t, want.Equal(*got), "want %s, got %s", want, *got)
+	require.Equal(t, time.UTC, got.Location(), "the API serializes the time in UTC")
 }
 
 func TestSavePositionStoresPointAndUpdatesLastPosition(t *testing.T) {

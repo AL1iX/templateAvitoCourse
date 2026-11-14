@@ -14,7 +14,7 @@ import (
 var tripColumns = []string{
 	"id", "user_id", "driver_id",
 	"start_latitude", "start_longitude", "end_latitude", "end_longitude",
-	"price", "status", "started_at", "finished_at",
+	"price", "status", "started_at", "finished_at", "last_position_at",
 }
 
 func (r *Repository) GetByID(ctx context.Context, id string) (*domain.Trip, error) {
@@ -45,7 +45,7 @@ func (r *Repository) fetch(ctx context.Context, id string, lock bool) (*domain.T
 	err = r.db.Executor(ctx).QueryRow(ctx, query, args...).Scan(
 		&row.ID, &row.UserID, &row.DriverID,
 		&row.StartLatitude, &row.StartLongitude, &row.EndLatitude, &row.EndLongitude,
-		&row.Price, &row.Status, &row.StartedAt, &row.FinishedAt,
+		&row.Price, &row.Status, &row.StartedAt, &row.FinishedAt, &row.LastPositionAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

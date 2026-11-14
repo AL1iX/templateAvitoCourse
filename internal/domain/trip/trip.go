@@ -24,6 +24,8 @@ type Trip struct {
 	status     Status
 	startedAt  time.Time
 	finishedAt *time.Time
+
+	lastPositionAt *time.Time
 }
 
 func New(id, userID, driverID string, start, end Point, price int64, startedAt time.Time) (*Trip, error) {
@@ -46,11 +48,15 @@ func New(id, userID, driverID string, start, end Point, price int64, startedAt t
 	}, nil
 }
 
-func Restore(id, userID, driverID string, start, end Point, price int64, status Status, startedAt time.Time, finishedAt *time.Time) *Trip {
+func Restore(
+	id, userID, driverID string, start, end Point, price int64,
+	status Status, startedAt time.Time, finishedAt, lastPositionAt *time.Time,
+) *Trip {
 	return &Trip{
 		id: id, userID: userID, driverID: driverID,
 		start: start, end: end, price: price,
 		status: status, startedAt: startedAt, finishedAt: finishedAt,
+		lastPositionAt: lastPositionAt,
 	}
 }
 
@@ -72,6 +78,8 @@ func (t *Trip) Price() int64           { return t.price }
 func (t *Trip) Status() Status         { return t.status }
 func (t *Trip) StartedAt() time.Time   { return t.startedAt }
 func (t *Trip) FinishedAt() *time.Time { return t.finishedAt }
+
+func (t *Trip) LastPositionAt() *time.Time { return t.lastPositionAt }
 
 func validPoint(p Point) bool {
 	return p.Latitude >= -90 && p.Latitude <= 90 && p.Longitude >= -180 && p.Longitude <= 180

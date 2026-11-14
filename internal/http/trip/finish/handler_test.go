@@ -30,7 +30,7 @@ func TestHandle(t *testing.T) {
 	finishedAt := time.Date(2026, 10, 27, 11, 0, 0, 0, time.UTC)
 	finished := trip.Restore(tripID, userID, driverID,
 		trip.Point{Latitude: 56.8, Longitude: 60.6}, trip.Point{Latitude: 56.9, Longitude: 60.7},
-		500, trip.StatusCompleted, time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC), &finishedAt)
+		500, trip.StatusCompleted, time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC), &finishedAt, nil)
 
 	tests := []struct {
 		name       string
@@ -86,4 +86,19 @@ func TestHandle(t *testing.T) {
 			require.Equal(t, generated.TripStatus("completed"), got.Status)
 		})
 	}
+}
+
+func TestToAPIReturnsLastPositionAt(t *testing.T) {
+	startedAt := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	lastPositionAt := startedAt.Add(30 * time.Minute)
+	point := trip.Point{Latitude: 56.8, Longitude: 60.6}
+
+	withPosition := toAPI(trip.Restore(tripID, userID, driverID, point, point, 100,
+		trip.StatusActive, startedAt, nil, &lastPositionAt))
+	withoutPosition := toAPI(trip.Restore(tripID, userID, driverID, point, point, 100,
+		trip.StatusActive, startedAt, nil, nil))
+
+	require.NotNil(t, withPosition.LastPositionAt)
+	require.True(t, lastPositionAt.Equal(*withPosition.LastPositionAt))
+	require.Nil(t, withoutPosition.LastPositionAt)
 }

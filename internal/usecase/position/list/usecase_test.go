@@ -16,7 +16,7 @@ const tripID = "t1"
 
 func TestExecute(t *testing.T) {
 	startedAt := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
-	existing := trip.Restore(tripID, "u1", "d1", trip.Point{}, trip.Point{}, 100, trip.StatusActive, startedAt, nil)
+	existing := trip.Restore(tripID, "u1", "d1", trip.Point{}, trip.Point{}, 100, trip.StatusActive, startedAt, nil, nil)
 	positions := []*trip.Position{
 		trip.RestorePosition(1, tripID, trip.Point{Latitude: 1, Longitude: 2}, startedAt),
 		trip.RestorePosition(2, tripID, trip.Point{Latitude: 3, Longitude: 4}, startedAt.Add(time.Second)),
