@@ -307,7 +307,7 @@ func TestStaleCopyAfterCancelAndRequeueIsDiscarded(t *testing.T) {
 	f.stop(t)
 
 	require.Equal(t, []string{requestSuccess, requestSuccess}, drain(f.events),
-		"two copies of the second trip are in the channel, only the current one is requested")
+		"two copies of the second trip are in the queue, only the current one is requested")
 }
 
 func TestFullQueueDropsTripsWithoutBlockingTheScanner(t *testing.T) {
@@ -327,8 +327,8 @@ func TestFullQueueDropsTripsWithoutBlockingTheScanner(t *testing.T) {
 	require.Equal(t, 2, f.c.QueueSize())
 	require.Equal(t, 3, strings.Count(logs.String(), `"level":"WARN"`))
 
-	<-f.c.queue
-	<-f.c.queue
+	f.c.queue.pop()
+	f.c.queue.pop()
 	f.c.tick(t.Context())
 
 	require.ElementsMatch(t, []string{
@@ -402,6 +402,98 @@ func TestScannerStopsReadingBatchesWhenQueueIsFull(t *testing.T) {
 	require.ElementsMatch(t,
 		[]string{checkQueued, checkQueued, checkDropped, requestDropped}, drain(f.events))
 	require.Equal(t, 3, receive(t, f.rows), "the next batch is not read, the next tick starts again")
+}
+
+func tripAt(id string, minute int) model.StaleTrip {
+	return model.StaleTrip{
+		TripID: id, DriverID: driverOf(id), LastActivityAt: queueBase.Add(time.Duration(minute) * time.Minute),
+	}
+}
+
+func TestWorkerTakesTheLongestSilentTripFirst(t *testing.T) {
+	f := newFixture(t, 1, 10)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+		Return([]model.StaleTrip{tripAt(tripC, 30), tripAt(tripA, 10), tripAt(tripB, 20)}, nil)
+	gomock.InOrder(
+		f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(nil),
+		f.gateway.EXPECT().RequestPosition(gomock.Any(), tripB, driverOf(tripB)).Return(nil),
+		f.gateway.EXPECT().RequestPosition(gomock.Any(), tripC, driverOf(tripC)).Return(nil),
+	)
+	f.c.tick(t.Context())
+
+	f.start(t)
+
+	require.ElementsMatch(t, []string{
+		checkQueued, checkQueued, checkQueued, requestSuccess, requestSuccess, requestSuccess,
+	}, waitEvents(t, f.events, 6))
+}
+
+func TestFullQueueEvictsTheFresherTripForAnOlderOne(t *testing.T) {
+	f := newFixture(t, 1, 2)
+	var logs bytes.Buffer
+	f.c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	gomock.InOrder(
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripB, 20), tripAt(tripC, 30)}, nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripA, 10)}, nil),
+	)
+	f.c.tick(t.Context())
+	require.Equal(t, []string{checkQueued, checkQueued}, drain(f.events))
+
+	f.c.tick(t.Context())
+
+	require.ElementsMatch(t, []string{checkDropped, requestDropped, checkQueued}, drain(f.events),
+		"the evicted trip counts as dropped, the older one as queued")
+	require.Equal(t, 2, f.c.QueueSize())
+	require.Equal(t, 1, strings.Count(logs.String(), `"level":"WARN"`))
+	require.Contains(t, logs.String(), `"trip_id":"`+tripC+`"`)
+	_, added := f.c.inQueue.add(tripC)
+	require.True(t, added, "the evicted trip left the map and can be queued again")
+	first, _ := f.c.queue.pop()
+	second, _ := f.c.queue.pop()
+	require.Equal(t, []string{tripA, tripB}, []string{first.trip.TripID, second.trip.TripID})
+}
+
+func TestEvictedTripIsNeverRequested(t *testing.T) {
+	f := newFixture(t, 1, 2)
+	gomock.InOrder(
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripB, 20), tripAt(tripC, 30)}, nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripA, 10)}, nil),
+	)
+	f.c.tick(t.Context())
+	f.c.tick(t.Context())
+	drain(f.events)
+	gomock.InOrder(
+		f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(nil),
+		f.gateway.EXPECT().RequestPosition(gomock.Any(), tripB, driverOf(tripB)).Return(nil),
+	)
+
+	f.start(t)
+
+	require.Equal(t, []string{requestSuccess, requestSuccess}, waitEvents(t, f.events, 2))
+	f.stop(t)
+	require.Empty(t, drain(f.events), "no request for the evicted trip")
+}
+
+func TestFullQueueDropsAFresherTripAndKeepsTheOlderOnes(t *testing.T) {
+	f := newFixture(t, 1, 1)
+	gomock.InOrder(
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripA, 10)}, nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripB, 20)}, nil),
+	)
+	f.c.tick(t.Context())
+	drain(f.events)
+
+	f.c.tick(t.Context())
+
+	require.ElementsMatch(t, []string{checkDropped, requestDropped}, drain(f.events))
+	kept, _ := f.c.queue.pop()
+	require.Equal(t, tripA, kept.trip.TripID)
 }
 
 func TestPoolRunsConfiguredNumberOfWorkers(t *testing.T) {
@@ -479,7 +571,7 @@ func TestStopDrainsTheQueueAndStopsTheTicker(t *testing.T) {
 	close(release)
 
 	require.NoError(t, receive(t, stopped))
-	_, open := <-f.c.queue
+	_, open := f.c.queue.pop()
 	require.False(t, open, "the scanner closes the queue, so the workers finish after draining it")
 	require.True(t, f.ticker.isStopped())
 	require.Equal(t, []string{requestSuccess, requestSuccess, requestSuccess}, drain(f.events),

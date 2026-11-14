@@ -47,7 +47,7 @@ type Component struct {
 	newTicker func(time.Duration) ticker
 
 	inQueue   *inQueue
-	queue     chan task
+	queue     *priorityQueue
 	active    atomic.Int64
 	abandoned atomic.Int64
 	wg        sync.WaitGroup
@@ -73,7 +73,7 @@ func New(
 		logger:    logger,
 		newTicker: newTimeTicker,
 		inQueue:   newInQueue(),
-		queue:     make(chan task, cfg.QueueSize),
+		queue:     newPriorityQueue(cfg.QueueSize),
 	}
 }
 
@@ -122,7 +122,7 @@ func (c *Component) Cancel(tripID string) {
 }
 
 func (c *Component) QueueSize() int {
-	return len(c.queue)
+	return c.queue.size()
 }
 
 func (c *Component) ActiveWorkers() int {
@@ -131,7 +131,7 @@ func (c *Component) ActiveWorkers() int {
 
 func (c *Component) scan(ctx context.Context) {
 	defer c.wg.Done()
-	defer close(c.queue)
+	defer c.queue.shut()
 
 	tk := c.newTicker(c.cfg.CheckInterval)
 	defer tk.Stop()
@@ -191,23 +191,37 @@ func (c *Component) enqueue(ctx context.Context, t model.StaleTrip, scan trace.S
 		return resultDuplicate
 	}
 
-	select {
-	case c.queue <- task{trip: t, version: version, scan: scan}:
-		c.metrics.StaleCheck(ctx, resultQueued)
-		return resultQueued
-	default:
+	accepted, evicted := c.queue.push(task{trip: t, version: version, scan: scan})
+	if evicted != nil {
+		c.inQueue.finish(evicted.trip.TripID, evicted.version)
+		c.countDropped(ctx)
+		c.logger.WarnContext(ctx, "position request queue is full, a trip silent for less time was evicted",
+			"trip_id", evicted.trip.TripID, "replaced_by", t.TripID)
+	}
+	if !accepted {
 		c.inQueue.finish(t.TripID, version)
-		c.metrics.StaleCheck(ctx, resultDropped)
-		c.metrics.PositionRequest(ctx, resultDropped)
+		c.countDropped(ctx)
 		c.logger.WarnContext(ctx, "position request queue is full, task dropped", "trip_id", t.TripID)
 		return resultDropped
 	}
+
+	c.metrics.StaleCheck(ctx, resultQueued)
+	return resultQueued
+}
+
+func (c *Component) countDropped(ctx context.Context) {
+	c.metrics.StaleCheck(ctx, resultDropped)
+	c.metrics.PositionRequest(ctx, resultDropped)
 }
 
 func (c *Component) worker() {
 	defer c.wg.Done()
 
-	for t := range c.queue {
+	for {
+		t, ok := c.queue.pop()
+		if !ok {
+			return
+		}
 		c.handle(t)
 	}
 }
