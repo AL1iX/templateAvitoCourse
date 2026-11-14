@@ -157,7 +157,9 @@ func (c *Container) Run(ctx context.Context) error {
 		defer cleanup.Done()
 		c.cleanupExpiredKeys(cleanupCtx)
 	}()
-	c.poller.Start(ctx)
+	pollCtx, stopPoll := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopPoll()
+	c.poller.Start(pollCtx)
 
 	errCh := make(chan error, 1)
 	serveDone := make(chan struct{})
@@ -181,11 +183,12 @@ func (c *Container) Run(ctx context.Context) error {
 	defer cancel()
 	c.shutdownDeadline, _ = shutdownCtx.Deadline()
 
-	return errors.Join(serveErr, c.shutdown(shutdownCtx, serveDone, stopCleanup, &cleanup))
+	return errors.Join(serveErr, c.shutdown(shutdownCtx, serveDone, stopPoll, stopCleanup, &cleanup))
 }
 
 func (c *Container) shutdown(
-	ctx context.Context, serveDone <-chan struct{}, stopCleanup context.CancelFunc, cleanup *sync.WaitGroup,
+	ctx context.Context, serveDone <-chan struct{},
+	stopPoll, stopCleanup context.CancelFunc, cleanup *sync.WaitGroup,
 ) error {
 	var errs []error
 
@@ -198,6 +201,7 @@ func (c *Container) shutdown(
 	}
 	<-serveDone
 
+	stopPoll()
 	if err := c.poller.Stop(ctx); err != nil {
 		errs = append(errs, err)
 	}

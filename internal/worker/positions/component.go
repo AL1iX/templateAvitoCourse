@@ -77,10 +77,9 @@ func New(
 }
 
 func (c *Component) Start(ctx context.Context) {
-	base := context.WithoutCancel(ctx)
-	scanCtx, stopScan := context.WithCancel(base)
+	scanCtx, stopScan := context.WithCancel(ctx)
 	c.stopScan = stopScan
-	c.forceCtx, c.abort = context.WithCancel(base)
+	c.forceCtx, c.abort = context.WithCancel(context.WithoutCancel(ctx))
 
 	c.wg.Add(c.cfg.Workers + 1)
 	for range c.cfg.Workers {

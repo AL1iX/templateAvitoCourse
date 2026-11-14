@@ -413,18 +413,20 @@ func TestStopDrainsTheQueueAndStopsTheTicker(t *testing.T) {
 		"the trips that were queued before the stop are still requested")
 }
 
-func TestStartIsNotStoppedByCancellationOfItsContext(t *testing.T) {
-	f := newFixture(t, 1, 10)
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA), nil)
+func TestContextCancellationStopsScannerAndWorkers(t *testing.T) {
+	f := newFixture(t, 2, 10)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA, tripB), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(nil)
+	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripB, driverOf(tripB)).Return(nil)
+	before := goleak.IgnoreCurrent()
 	ctx, cancel := context.WithCancel(t.Context())
 	f.startWith(ctx, t)
+	f.ticker.tick(t)
+	waitEvents(t, f.events, 4)
 
 	cancel()
-	f.ticker.tick(t)
 
-	require.ElementsMatch(t, []string{checkQueued, requestSuccess}, waitEvents(t, f.events, 2),
-		"only Stop ends the scanner, so the signal context cannot stop it before the HTTP server")
+	require.NoError(t, goleak.Find(before))
 }
 
 func TestStopAbortsRequestsWhenTheBudgetIsSpent(t *testing.T) {
