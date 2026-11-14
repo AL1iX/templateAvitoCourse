@@ -34,19 +34,19 @@ var (
 	wantPoint  = trip.Point{Latitude: 59.935, Longitude: 30.335}
 )
 
-func newHandler(uc *MockuseCase) *Handler {
+func newHandler(uc *MockuseCase, c *Mockcanceller) *Handler {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	return New(uc, domainerror.New(logger))
+	return New(uc, c, domainerror.New(logger))
 }
 
 func body() string {
 	return `{"coordinates":{"latitude":59.935,"longitude":30.335},"recorded_at":"2026-11-14T12:00:05Z"}`
 }
 
-func serve(uc *MockuseCase, raw string) *httptest.ResponseRecorder {
+func serve(uc *MockuseCase, c *Mockcanceller, raw string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/trips/"+tripID+"/positions", strings.NewReader(raw))
 	rec := httptest.NewRecorder()
-	newHandler(uc).Handle(rec, req, uuid.MustParse(tripID))
+	newHandler(uc, c).Handle(rec, req, uuid.MustParse(tripID))
 	return rec
 }
 
@@ -60,6 +60,7 @@ func TestHandle(t *testing.T) {
 		setup      func(uc *MockuseCase)
 		wantStatus int
 		wantCode   string
+		wantCancel bool
 	}{
 		{
 			name: "position is saved",
@@ -74,6 +75,7 @@ func TestHandle(t *testing.T) {
 				)
 			},
 			wantStatus: http.StatusCreated,
+			wantCancel: true,
 		},
 		{
 			name: "trailing whitespace is allowed",
@@ -82,6 +84,7 @@ func TestHandle(t *testing.T) {
 				uc.EXPECT().Execute(gomock.Any(), tripID, gomock.Any(), gomock.Any()).Return(saved, nil)
 			},
 			wantStatus: http.StatusCreated,
+			wantCancel: true,
 		},
 		{
 			name:       "empty body",
@@ -200,10 +203,15 @@ func TestHandle(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			uc := NewMockuseCase(gomock.NewController(t))
+			ctrl := gomock.NewController(t)
+			uc := NewMockuseCase(ctrl)
+			c := NewMockcanceller(ctrl)
 			tc.setup(uc)
+			if tc.wantCancel {
+				c.EXPECT().Cancel(tripID)
+			}
 
-			rec := serve(uc, tc.body)
+			rec := serve(uc, c, tc.body)
 
 			require.Equal(t, tc.wantStatus, rec.Code)
 			require.NotContains(t, rec.Body.String(), "password")
@@ -261,9 +269,11 @@ func TestHandleRejectsMissingOrNullFields(t *testing.T) {
 				raw, err := json.Marshal(doc)
 				require.NoError(t, err)
 
-				uc := NewMockuseCase(gomock.NewController(t))
+				ctrl := gomock.NewController(t)
+				uc := NewMockuseCase(ctrl)
+				c := NewMockcanceller(ctrl)
 
-				rec := serve(uc, string(raw))
+				rec := serve(uc, c, string(raw))
 
 				require.Equal(t, http.StatusBadRequest, rec.Code)
 				var problem generated.Problem
@@ -277,7 +287,9 @@ func TestHandleRejectsMissingOrNullFields(t *testing.T) {
 func TestHandleExplicitZeroCoordinatesAreValid(t *testing.T) {
 	const zeroBody = `{"coordinates":{"latitude":0,"longitude":0},"recorded_at":"2026-11-14T12:00:05Z"}`
 
-	uc := NewMockuseCase(gomock.NewController(t))
+	ctrl := gomock.NewController(t)
+	uc := NewMockuseCase(ctrl)
+	c := NewMockcanceller(ctrl)
 	uc.EXPECT().Execute(gomock.Any(), tripID, gomock.Any(), gomock.Any()).DoAndReturn(
 		func(_ context.Context, _ string, point trip.Point, _ time.Time) (*trip.Position, error) {
 			require.Equal(t, trip.Point{}, point)
@@ -285,7 +297,22 @@ func TestHandleExplicitZeroCoordinatesAreValid(t *testing.T) {
 		},
 	)
 
-	rec := serve(uc, zeroBody)
+	rec := serve(uc, c, zeroBody)
 
 	require.Equal(t, http.StatusConflict, rec.Code, "request passed validation and reached the usecase")
+}
+
+func TestHandleCancelsQueuedRequestAfterTheUsecaseSucceeded(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	uc := NewMockuseCase(ctrl)
+	c := NewMockcanceller(ctrl)
+	gomock.InOrder(
+		uc.EXPECT().Execute(gomock.Any(), tripID, gomock.Any(), gomock.Any()).
+			Return(trip.RestorePosition(42, tripID, wantPoint, recordedAt), nil),
+		c.EXPECT().Cancel(tripID),
+	)
+
+	rec := serve(uc, c, body())
+
+	require.Equal(t, http.StatusCreated, rec.Code)
 }

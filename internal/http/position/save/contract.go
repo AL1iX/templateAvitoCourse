@@ -14,6 +14,10 @@ type useCase interface {
 	Execute(ctx context.Context, tripID string, point trip.Point, recordedAt time.Time) (*trip.Position, error)
 }
 
+type canceller interface {
+	Cancel(tripID string)
+}
+
 type errorWriter interface {
 	Write(w http.ResponseWriter, r *http.Request, err error)
 }

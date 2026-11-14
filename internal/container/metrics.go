@@ -13,6 +13,7 @@ import (
 
 type metrics struct {
 	trips       *telemetry.TripMetrics
+	positions   *telemetry.PositionMetrics
 	httpMiddle  func(http.Handler) http.Handler
 	queryTracer pgx.QueryTracer
 }
@@ -25,6 +26,11 @@ func newMetrics(tel *telemetry.Telemetry) (metrics, error) {
 		return metrics{}, fmt.Errorf("create trip metrics: %w", err)
 	}
 
+	positions, err := telemetry.NewPositionMetrics(meter)
+	if err != nil {
+		return metrics{}, fmt.Errorf("create position metrics: %w", err)
+	}
+
 	httpMiddle, err := middleware.Metrics(meter)
 	if err != nil {
 		return metrics{}, fmt.Errorf("create http metrics: %w", err)
@@ -35,5 +41,5 @@ func newMetrics(tel *telemetry.Telemetry) (metrics, error) {
 		return metrics{}, fmt.Errorf("create query tracer: %w", err)
 	}
 
-	return metrics{trips: trips, httpMiddle: httpMiddle, queryTracer: queryTracer}, nil
+	return metrics{trips: trips, positions: positions, httpMiddle: httpMiddle, queryTracer: queryTracer}, nil
 }

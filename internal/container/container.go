@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/AL1iX/templateAvitoCourse/internal/config"
+	"github.com/AL1iX/templateAvitoCourse/internal/gateway/push"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/domainerror"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/health"
 	"github.com/AL1iX/templateAvitoCourse/internal/http/middleware"
@@ -29,6 +31,7 @@ import (
 	createuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/trip/create"
 	finishuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/trip/finish"
 	getuc "github.com/AL1iX/templateAvitoCourse/internal/usecase/trip/get"
+	"github.com/AL1iX/templateAvitoCourse/internal/worker/positions"
 )
 
 const (
@@ -40,9 +43,13 @@ type Container struct {
 	server          *http.Server
 	pool            *pgxpool.Pool
 	tripRepo        *triprepo.Repository
+	pushClient      *push.Client
+	poller          *positions.Component
 	telemetry       *telemetry.Telemetry
 	logger          *slog.Logger
 	shutdownTimeout time.Duration
+
+	shutdownDeadline time.Time
 }
 
 func New(ctx context.Context, cfg config.Config) (*Container, error) {
@@ -53,7 +60,7 @@ func New(ctx context.Context, cfg config.Config) (*Container, error) {
 
 	c, err := build(ctx, cfg, tel)
 	if err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ShutdownTimeout)
 		defer cancel()
 		_ = tel.Shutdown(shutdownCtx)
 		return nil, err
@@ -77,8 +84,27 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 	txManager := transaction.New(pool, cfg.DatabaseQueryTimeout)
 	tripRepo := triprepo.New(txManager, cfg.IdempotencyKeyTTL)
 
-	err = telemetry.RegisterActiveTrips(tel.MeterProvider.Meter(instrumentationName), tripRepo.CountActive)
+	meter := tel.MeterProvider.Meter(instrumentationName)
+	err = telemetry.RegisterActiveTrips(meter, tripRepo.CountActive)
 	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+
+	pushClient := push.New(cfg.PushHTTPURL, cfg.PushRequestTimeout)
+	poller := positions.New(
+		positions.Config{
+			CheckInterval:  cfg.PositionCheckInterval,
+			StaleAfter:     cfg.PositionStaleAfter,
+			Workers:        cfg.PositionWorkers,
+			QueueSize:      cfg.PositionQueueSize,
+			RequestTimeout: cfg.PushRequestTimeout,
+		},
+		tripRepo, pushClient, m.positions, tel.TracerProvider.Tracer(instrumentationName), logger,
+	)
+	err = telemetry.RegisterPositionQueue(meter, poller.QueueSize, poller.ActiveWorkers)
+	if err != nil {
+		pushClient.Close()
 		pool.Close()
 		return nil, err
 	}
@@ -94,7 +120,7 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 		createhttp.New(createUC, errMapper),
 		gethttp.New(getUC, errMapper),
 		finishhttp.New(finishUC, errMapper),
-		saveposhttp.New(savePositionUC, errMapper),
+		saveposhttp.New(savePositionUC, poller, errMapper),
 		listposhttp.New(listPositionsUC, errMapper),
 		health.New(pool, cfg.DatabaseConnectTimeout, logger),
 		errMapper,
@@ -115,6 +141,8 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 		},
 		pool:            pool,
 		tripRepo:        tripRepo,
+		pushClient:      pushClient,
+		poller:          poller,
 		telemetry:       tel,
 		logger:          logger,
 		shutdownTimeout: cfg.ShutdownTimeout,
@@ -122,35 +150,62 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 }
 
 func (c *Container) Run(ctx context.Context) error {
-	// The cleanup stops when Run returns, including when the server fails
-	// to start while ctx is still alive.
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go c.cleanupExpiredKeys(ctx)
+	cleanupCtx, stopCleanup := context.WithCancel(context.WithoutCancel(ctx))
+	var cleanup sync.WaitGroup
+	cleanup.Add(1)
+	go func() {
+		defer cleanup.Done()
+		c.cleanupExpiredKeys(cleanupCtx)
+	}()
+	c.poller.Start(ctx)
 
 	errCh := make(chan error, 1)
+	serveDone := make(chan struct{})
 	go func() {
+		defer close(serveDone)
 		c.logger.Info("http server starting", "addr", c.server.Addr)
 		if err := c.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
 
+	var serveErr error
 	select {
 	case err := <-errCh:
-		return fmt.Errorf("http server: %w", err)
+		serveErr = fmt.Errorf("http server: %w", err)
 	case <-ctx.Done():
+		c.logger.Info("shutdown signal received")
 	}
-	c.logger.Info("shutdown signal received")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), c.shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.shutdownTimeout)
 	defer cancel()
+	c.shutdownDeadline, _ = shutdownCtx.Deadline()
 
-	if err := c.server.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("graceful shutdown: %w", err)
+	return errors.Join(serveErr, c.shutdown(shutdownCtx, serveDone, stopCleanup, &cleanup))
+}
+
+func (c *Container) shutdown(
+	ctx context.Context, serveDone <-chan struct{}, stopCleanup context.CancelFunc, cleanup *sync.WaitGroup,
+) error {
+	var errs []error
+
+	if err := c.server.Shutdown(ctx); err != nil {
+		c.logger.WarnContext(ctx, "http server did not stop in time, closing connections", "error", err)
+		_ = c.server.Close()
+		errs = append(errs, fmt.Errorf("graceful shutdown: %w", err))
+	} else {
+		c.logger.InfoContext(ctx, "http server stopped")
 	}
-	c.logger.Info("http server stopped")
-	return nil
+	<-serveDone
+
+	if err := c.poller.Stop(ctx); err != nil {
+		errs = append(errs, err)
+	}
+
+	stopCleanup()
+	cleanup.Wait()
+
+	return errors.Join(errs...)
 }
 
 // cleanupExpiredKeys deletes expired idempotency keys at start and then every
@@ -179,10 +234,15 @@ func (c *Container) cleanupExpiredKeys(ctx context.Context) {
 	}
 }
 
-func (c *Container) Close() {
-	ctx, cancel := context.WithTimeout(context.Background(), c.shutdownTimeout)
+func (c *Container) Close(ctx context.Context) {
+	deadline := c.shutdownDeadline
+	if deadline.IsZero() {
+		deadline = time.Now().Add(c.shutdownTimeout)
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
+	c.pushClient.Close()
 	if err := c.telemetry.Shutdown(ctx); err != nil {
 		c.logger.Warn("telemetry shutdown failed", "error", err)
 	}

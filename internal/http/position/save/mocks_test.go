@@ -58,6 +58,42 @@ func (mr *MockuseCaseMockRecorder) Execute(ctx, tripID, point, recordedAt any) *
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Execute", reflect.TypeOf((*MockuseCase)(nil).Execute), ctx, tripID, point, recordedAt)
 }
 
+// Mockcanceller is a mock of canceller interface.
+type Mockcanceller struct {
+	ctrl     *gomock.Controller
+	recorder *MockcancellerMockRecorder
+	isgomock struct{}
+}
+
+// MockcancellerMockRecorder is the mock recorder for Mockcanceller.
+type MockcancellerMockRecorder struct {
+	mock *Mockcanceller
+}
+
+// NewMockcanceller creates a new mock instance.
+func NewMockcanceller(ctrl *gomock.Controller) *Mockcanceller {
+	mock := &Mockcanceller{ctrl: ctrl}
+	mock.recorder = &MockcancellerMockRecorder{mock}
+	return mock
+}
+
+// EXPECT returns an object that allows the caller to indicate expected use.
+func (m *Mockcanceller) EXPECT() *MockcancellerMockRecorder {
+	return m.recorder
+}
+
+// Cancel mocks base method.
+func (m *Mockcanceller) Cancel(tripID string) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Cancel", tripID)
+}
+
+// Cancel indicates an expected call of Cancel.
+func (mr *MockcancellerMockRecorder) Cancel(tripID any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Cancel", reflect.TypeOf((*Mockcanceller)(nil).Cancel), tripID)
+}
+
 // MockerrorWriter is a mock of errorWriter interface.
 type MockerrorWriter struct {
 	ctrl     *gomock.Controller
