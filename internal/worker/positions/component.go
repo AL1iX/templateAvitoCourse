@@ -192,8 +192,7 @@ func (c *Component) enqueue(ctx context.Context, t model.StaleTrip, scan trace.S
 	}
 
 	accepted, evicted := c.queue.push(task{trip: t, version: version, scan: scan})
-	if evicted != nil {
-		c.inQueue.finish(evicted.trip.TripID, evicted.version)
+	if evicted != nil && c.inQueue.finish(evicted.trip.TripID, evicted.version) {
 		c.countDropped(ctx)
 		c.logger.WarnContext(ctx, "position request queue is full, a trip silent for less time was evicted",
 			"trip_id", evicted.trip.TripID, "replaced_by", t.TripID)

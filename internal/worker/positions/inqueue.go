@@ -38,11 +38,13 @@ func (q *inQueue) current(tripID string, version uint64) bool {
 	return q.versions[tripID] == version
 }
 
-func (q *inQueue) finish(tripID string, version uint64) {
+func (q *inQueue) finish(tripID string, version uint64) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.versions[tripID] == version {
-		delete(q.versions, tripID)
+	if q.versions[tripID] != version {
+		return false
 	}
+	delete(q.versions, tripID)
+	return true
 }

@@ -104,8 +104,9 @@ curl -i localhost:8080/ready
 | `IDEMPOTENCY_KEY_TTL` | `24h` (срок хранения ключей идемпотентности, положительное значение) |
 
 Переменные опроса устаревших поездок. `tripgoctl` создаёт их в `.env` третьей
-работы, а если переменной нет, берётся значение по умолчанию. Значение должно
-быть положительным, иначе запуск завершится ошибкой:
+работы, а если переменной нет, берётся значение по умолчанию. `POSITION_BATCH_SIZE`
+tripgoctl не создаёт, у неё всегда значение по умолчанию, пока не задана вручную.
+Значение должно быть положительным, иначе запуск завершится ошибкой:
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
@@ -116,9 +117,10 @@ curl -i localhost:8080/ready
 | `POSITION_BATCH_SIZE` | `100` | сколько поездок сканер читает из БД за один запрос |
 | `PUSH_REQUEST_TIMEOUT` | `1s` | таймаут одной задачи и всех таймаутов HTTP-клиента Push Service |
 
-`PUSH_ADMIN_URL` нужна только для самопроверки
-(`curl "$PUSH_ADMIN_URL/admin/behaviour"`), сервис её не читает. Админка
-заглушки отвечает на том же адресе, что и `PUSH_HTTP_URL`.
+`PUSH_ADMIN_URL` нужна только для самопроверки, сервис её не читает. `tripgoctl`
+кладёт в `.env` только `PUSH_HTTP_URL`, а админка заглушки отвечает на том же
+адресе. Поэтому в командах самопроверки используется
+`${PUSH_ADMIN_URL:-$PUSH_HTTP_URL}`: если `PUSH_ADMIN_URL` задана, берётся она.
 
 Полный список переменных приведён в `.env.example`.
 
@@ -504,7 +506,7 @@ done
 заглушка, которая отвечает 3 секунды:
 
 ```bash
-curl -fsS -X POST "$PUSH_HTTP_URL/admin/behaviour" -H 'content-type: application/json' -d '{"latency_ms":3000}'
+curl -fsS -X POST "${PUSH_ADMIN_URL:-$PUSH_HTTP_URL}/admin/behaviour" -H 'content-type: application/json' -d '{"latency_ms":3000}'
 POSITION_QUEUE_SIZE=10 POSITION_CHECK_INTERVAL=2s POSITION_STALE_AFTER=2s PUSH_REQUEST_TIMEOUT=5s go run ./cmd/trip-service
 ```
 
@@ -520,7 +522,7 @@ done
 миллисекунды. После проверки верните заглушку в исходное состояние:
 
 ```bash
-curl -fsS -X POST "$PUSH_HTTP_URL/admin/behaviour" -H 'content-type: application/json' -d '{"latency_ms":0}'
+curl -fsS -X POST "${PUSH_ADMIN_URL:-$PUSH_HTTP_URL}/admin/behaviour" -H 'content-type: application/json' -d '{"latency_ms":0}'
 ```
 
 `SIGTERM` под нагрузкой завершает процесс в пределах `SHUTDOWN_TIMEOUT`.

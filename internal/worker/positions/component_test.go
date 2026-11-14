@@ -455,6 +455,26 @@ func TestFullQueueEvictsTheFresherTripForAnOlderOne(t *testing.T) {
 	require.Equal(t, []string{tripA, tripB}, []string{first.trip.TripID, second.trip.TripID})
 }
 
+func TestEvictingACancelledTaskIsNotCountedAsDropped(t *testing.T) {
+	f := newFixture(t, 1, 2)
+	var logs bytes.Buffer
+	f.c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	gomock.InOrder(
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripB, 20), tripAt(tripC, 30)}, nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+			Return([]model.StaleTrip{tripAt(tripA, 10)}, nil),
+	)
+	f.c.tick(t.Context())
+	drain(f.events)
+	f.c.Cancel(tripC)
+
+	f.c.tick(t.Context())
+
+	require.Equal(t, []string{checkQueued}, drain(f.events), "the cancelled copy was already not going to be requested")
+	require.NotContains(t, logs.String(), `"level":"WARN"`)
+}
+
 func TestEvictedTripIsNeverRequested(t *testing.T) {
 	f := newFixture(t, 1, 2)
 	gomock.InOrder(
