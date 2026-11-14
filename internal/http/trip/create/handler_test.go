@@ -46,7 +46,7 @@ func body() string {
 func TestHandle(t *testing.T) {
 	created := trip.Restore(tripID, userID, driverID,
 		trip.Point{Latitude: 56.8, Longitude: 60.6}, trip.Point{Latitude: 56.9, Longitude: 60.7},
-		500, trip.StatusActive, time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC), nil)
+		500, trip.StatusActive, time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC), nil, nil)
 	errDB := errors.New("password authentication failed")
 
 	tests := []struct {
@@ -286,4 +286,19 @@ func TestHandleIdempotencyKey(t *testing.T) {
 	newHandler(uc).Handle(rec, req, generated.CreateTripParams{IdempotencyKey: &key})
 
 	require.Equal(t, http.StatusConflict, rec.Code)
+}
+
+func TestToAPIReturnsLastPositionAt(t *testing.T) {
+	startedAt := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	lastPositionAt := startedAt.Add(30 * time.Minute)
+	point := trip.Point{Latitude: 56.8, Longitude: 60.6}
+
+	withPosition := toAPI(trip.Restore(tripID, userID, driverID, point, point, 100,
+		trip.StatusActive, startedAt, nil, &lastPositionAt))
+	withoutPosition := toAPI(trip.Restore(tripID, userID, driverID, point, point, 100,
+		trip.StatusActive, startedAt, nil, nil))
+
+	require.NotNil(t, withPosition.LastPositionAt)
+	require.True(t, lastPositionAt.Equal(*withPosition.LastPositionAt))
+	require.Nil(t, withoutPosition.LastPositionAt)
 }

@@ -18,5 +18,7 @@ func toAPI(t *trip.Trip) generated.Trip {
 		Status:     generated.TripStatus(t.Status()),
 		StartedAt:  t.StartedAt(),
 		FinishedAt: t.FinishedAt(),
+
+		LastPositionAt: t.LastPositionAt(),
 	}
 }

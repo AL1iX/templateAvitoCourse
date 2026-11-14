@@ -31,7 +31,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer app.Close()
+	defer app.Close(context.WithoutCancel(ctx))
 
 	return app.Run(ctx)
 }

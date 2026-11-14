@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -21,6 +22,14 @@ type Config struct {
 	DatabaseQueryTimeout    time.Duration
 
 	IdempotencyKeyTTL time.Duration
+
+	PositionCheckInterval time.Duration
+	PositionStaleAfter    time.Duration
+	PositionWorkers       int
+	PositionQueueSize     int
+	PositionBatchSize     int
+	PushHTTPURL           string
+	PushRequestTimeout    time.Duration
 
 	HTTPReadTimeout       time.Duration
 	HTTPReadHeaderTimeout time.Duration
@@ -110,6 +119,41 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("IDEMPOTENCY_KEY_TTL (%s) must be positive", cfg.IdempotencyKeyTTL)
 	}
 
+	cfg.PositionCheckInterval, err = optionalPositiveDuration("POSITION_CHECK_INTERVAL", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.PositionStaleAfter, err = optionalPositiveDuration("POSITION_STALE_AFTER", 60*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.PositionWorkers, err = optionalPositiveInt("POSITION_WORKERS", 4)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.PositionQueueSize, err = optionalPositiveInt("POSITION_QUEUE_SIZE", 100)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.PositionBatchSize, err = optionalPositiveInt("POSITION_BATCH_SIZE", 100)
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.PushHTTPURL, err = requireHTTPURL("PUSH_HTTP_URL")
+	if err != nil {
+		return Config{}, err
+	}
+
+	cfg.PushRequestTimeout, err = optionalPositiveDuration("PUSH_REQUEST_TIMEOUT", time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
 	if cfg.DatabaseMinConns > cfg.DatabaseMaxConns {
 		return Config{}, fmt.Errorf("DATABASE_MIN_CONNS (%d) must not exceed DATABASE_MAX_CONNS (%d)",
 			cfg.DatabaseMinConns, cfg.DatabaseMaxConns)
@@ -159,6 +203,46 @@ func optionalDuration(key string, def time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("environment variable %s: invalid duration %q: %w", key, v, err)
 	}
 	return d, nil
+}
+
+func optionalPositiveDuration(key string, def time.Duration) (time.Duration, error) {
+	d, err := optionalDuration(key, def)
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("environment variable %s (%s) must be positive", key, d)
+	}
+	return d, nil
+}
+
+func optionalPositiveInt(key string, def int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("environment variable %s: invalid integer %q: %w", key, v, err)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("environment variable %s (%d) must be positive", key, n)
+	}
+	return n, nil
+}
+
+func requireHTTPURL(key string) (string, error) {
+	v, err := requireString(key)
+	if err != nil {
+		return "", err
+	}
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("environment variable %s must be an http or https URL with a host, "+
+			"without credentials, query and fragment", key)
+	}
+	return v, nil
 }
 
 func requireInt32(key string) (int32, error) {

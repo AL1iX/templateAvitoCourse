@@ -36,7 +36,7 @@ func TestExecute(t *testing.T) {
 	invalid.Price = -1
 
 	existing := trip.Restore("old", "u1", "d1", trip.Point{}, trip.Point{}, 100,
-		trip.StatusActive, time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC), nil)
+		trip.StatusActive, time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC), nil, nil)
 	errDB := errors.New("db down")
 
 	runTx := func(ctx context.Context, fn func(context.Context) error) error { return fn(ctx) }

@@ -18,10 +18,10 @@ func TestExecute(t *testing.T) {
 	startedAt := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	completedAt := startedAt.Add(time.Hour)
 	active := func() *trip.Trip {
-		return trip.Restore("t1", "u1", "d1", trip.Point{}, trip.Point{}, 100, trip.StatusActive, startedAt, nil)
+		return trip.Restore("t1", "u1", "d1", trip.Point{}, trip.Point{}, 100, trip.StatusActive, startedAt, nil, nil)
 	}
 	completed := func() *trip.Trip {
-		return trip.Restore("t1", "u1", "d1", trip.Point{}, trip.Point{}, 100, trip.StatusCompleted, startedAt, &completedAt)
+		return trip.Restore("t1", "u1", "d1", trip.Point{}, trip.Point{}, 100, trip.StatusCompleted, startedAt, &completedAt, nil)
 	}
 	errDB := errors.New("db down")
 

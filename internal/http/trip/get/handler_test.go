@@ -29,7 +29,7 @@ const (
 func TestHandle(t *testing.T) {
 	found := trip.Restore(tripID, userID, driverID,
 		trip.Point{Latitude: 56.8, Longitude: 60.6}, trip.Point{Latitude: 56.9, Longitude: 60.7},
-		500, trip.StatusActive, time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC), nil)
+		500, trip.StatusActive, time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC), nil, nil)
 
 	tests := []struct {
 		name       string
@@ -79,4 +79,35 @@ func TestHandle(t *testing.T) {
 			require.Equal(t, generated.TripStatus("active"), got.Status)
 		})
 	}
+}
+
+func TestToAPIReturnsLastPositionAt(t *testing.T) {
+	startedAt := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	lastPositionAt := startedAt.Add(30 * time.Minute)
+	point := trip.Point{Latitude: 56.8, Longitude: 60.6}
+
+	withPosition := toAPI(trip.Restore(tripID, userID, driverID, point, point, 100,
+		trip.StatusActive, startedAt, nil, &lastPositionAt))
+	withoutPosition := toAPI(trip.Restore(tripID, userID, driverID, point, point, 100,
+		trip.StatusActive, startedAt, nil, nil))
+
+	require.NotNil(t, withPosition.LastPositionAt)
+	require.True(t, lastPositionAt.Equal(*withPosition.LastPositionAt))
+	require.Nil(t, withoutPosition.LastPositionAt)
+}
+
+func TestHandleReturnsLastPositionAtInTheBody(t *testing.T) {
+	lastPositionAt := time.Date(2026, 10, 27, 10, 30, 0, 0, time.UTC)
+	found := trip.Restore(tripID, userID, driverID, trip.Point{}, trip.Point{}, 100,
+		trip.StatusActive, time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC), nil, &lastPositionAt)
+	uc := NewMockuseCase(gomock.NewController(t))
+	uc.EXPECT().Execute(gomock.Any(), tripID).Return(found, nil)
+	h := New(uc, domainerror.New(slog.New(slog.NewJSONHandler(io.Discard, nil))))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/trips/"+tripID, nil)
+	rec := httptest.NewRecorder()
+
+	h.Handle(rec, req, uuid.MustParse(tripID))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"last_position_at":"2026-10-27T10:30:00Z"`)
 }

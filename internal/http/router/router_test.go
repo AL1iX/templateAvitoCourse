@@ -18,7 +18,7 @@ import (
 const tripsPath = "/api/v1/trips"
 
 func TestInvalidParameters(t *testing.T) {
-	handler := router.New(nil, nil, nil, nil,
+	handler := router.New(nil, nil, nil, nil, nil, nil,
 		domainerror.New(slog.New(slog.NewJSONHandler(io.Discard, nil))))
 
 	tests := []struct {
@@ -29,6 +29,8 @@ func TestInvalidParameters(t *testing.T) {
 	}{
 		{name: "get with invalid trip id", method: http.MethodGet, path: tripsPath + "/not-a-uuid"},
 		{name: "finish with invalid trip id", method: http.MethodPost, path: tripsPath + "/not-a-uuid/finish"},
+		{name: "save position with invalid trip id", method: http.MethodPost, path: tripsPath + "/not-a-uuid/positions"},
+		{name: "list positions with invalid trip id", method: http.MethodGet, path: tripsPath + "/not-a-uuid/positions"},
 		{name: "create with invalid idempotency key", method: http.MethodPost, path: tripsPath, header: map[string]string{"Idempotency-Key": "nope"}},
 	}
 	for _, tc := range tests {

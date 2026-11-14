@@ -14,20 +14,29 @@ import (
 const unmatchedRoute = "unmatched"
 
 type Router struct {
-	create createHandler
-	get    tripHandler
-	finish tripHandler
-	health healthHandler
+	create        createHandler
+	get           tripHandler
+	finish        tripHandler
+	savePosition  tripHandler
+	listPositions tripHandler
+	health        healthHandler
 }
 
 func New(
 	create createHandler,
-	get, finish tripHandler,
+	get, finish, savePosition, listPositions tripHandler,
 	health healthHandler,
 	errw errorWriter,
 	middlewares ...func(http.Handler) http.Handler,
 ) http.Handler {
-	impl := &Router{create: create, get: get, finish: finish, health: health}
+	impl := &Router{
+		create:        create,
+		get:           get,
+		finish:        finish,
+		savePosition:  savePosition,
+		listPositions: listPositions,
+		health:        health,
+	}
 
 	mux := chi.NewRouter()
 	generated.HandlerWithOptions(impl, generated.ChiServerOptions{
@@ -77,6 +86,14 @@ func (rt *Router) GetTrip(w http.ResponseWriter, r *http.Request, id generated.T
 
 func (rt *Router) FinishTrip(w http.ResponseWriter, r *http.Request, id generated.TripId) {
 	rt.finish.Handle(w, r, id)
+}
+
+func (rt *Router) CreateTripPosition(w http.ResponseWriter, r *http.Request, id generated.TripId) {
+	rt.savePosition.Handle(w, r, id)
+}
+
+func (rt *Router) ListTripPositions(w http.ResponseWriter, r *http.Request, id generated.TripId) {
+	rt.listPositions.Handle(w, r, id)
 }
 
 func (rt *Router) Health(w http.ResponseWriter, r *http.Request) {
