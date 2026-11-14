@@ -98,6 +98,7 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 			StaleAfter:     cfg.PositionStaleAfter,
 			Workers:        cfg.PositionWorkers,
 			QueueSize:      cfg.PositionQueueSize,
+			BatchSize:      cfg.PositionBatchSize,
 			RequestTimeout: cfg.PushRequestTimeout,
 		},
 		tripRepo, pushClient, m.positions, tel.TracerProvider.Tracer(instrumentationName), logger,

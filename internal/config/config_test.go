@@ -12,6 +12,7 @@ const (
 	keyStaleAfter    = "POSITION_STALE_AFTER"
 	keyWorkers       = "POSITION_WORKERS"
 	keyQueueSize     = "POSITION_QUEUE_SIZE"
+	keyBatchSize     = "POSITION_BATCH_SIZE"
 	keyPushURL       = "PUSH_HTTP_URL"
 	keyPushTimeout   = "PUSH_REQUEST_TIMEOUT"
 
@@ -41,6 +42,7 @@ var optionalKeys = []string{
 	keyStaleAfter,
 	keyWorkers,
 	keyQueueSize,
+	keyBatchSize,
 	keyPushTimeout,
 }
 
@@ -68,6 +70,7 @@ func TestLoadPositionDefaults(t *testing.T) {
 	require.Equal(t, 60*time.Second, cfg.PositionStaleAfter)
 	require.Equal(t, 4, cfg.PositionWorkers)
 	require.Equal(t, 100, cfg.PositionQueueSize)
+	require.Equal(t, 100, cfg.PositionBatchSize)
 	require.Equal(t, time.Second, cfg.PushRequestTimeout)
 	require.Equal(t, testPushURL, cfg.PushHTTPURL)
 }
@@ -78,6 +81,7 @@ func TestLoadPositionOverrides(t *testing.T) {
 		keyStaleAfter:    "5s",
 		keyWorkers:       "8",
 		keyQueueSize:     "10",
+		keyBatchSize:     "50",
 		keyPushTimeout:   "250ms",
 		keyPushURL:       "https://push.internal:8443",
 	})
@@ -89,6 +93,7 @@ func TestLoadPositionOverrides(t *testing.T) {
 	require.Equal(t, 5*time.Second, cfg.PositionStaleAfter)
 	require.Equal(t, 8, cfg.PositionWorkers)
 	require.Equal(t, 10, cfg.PositionQueueSize)
+	require.Equal(t, 50, cfg.PositionBatchSize)
 	require.Equal(t, 250*time.Millisecond, cfg.PushRequestTimeout)
 	require.Equal(t, "https://push.internal:8443", cfg.PushHTTPURL)
 }
@@ -110,6 +115,9 @@ func TestLoadRejectsInvalidPositionSettings(t *testing.T) {
 		{name: "workers is not a number", key: keyWorkers, value: "four"},
 		{name: "queue size is zero", key: keyQueueSize, value: "0"},
 		{name: "queue size is not a number", key: keyQueueSize, value: "1.5"},
+		{name: "batch size is zero", key: keyBatchSize, value: "0"},
+		{name: "batch size is negative", key: keyBatchSize, value: "-100"},
+		{name: "batch size is not a number", key: keyBatchSize, value: "many"},
 		{name: "push timeout is zero", key: keyPushTimeout, value: "0s"},
 		{name: "push timeout has no unit", key: keyPushTimeout, value: "1"},
 		{name: "push url is missing", key: keyPushURL, value: ""},

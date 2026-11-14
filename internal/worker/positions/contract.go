@@ -10,7 +10,9 @@ import (
 //go:generate go tool mockgen -source=contract.go -destination=mocks_test.go -package=positions
 
 type staleTripFinder interface {
-	FindStale(ctx context.Context, staleAfter time.Duration) ([]model.StaleTrip, error)
+	FindStale(
+		ctx context.Context, staleAfter time.Duration, limit int, after *model.StaleCursor,
+	) ([]model.StaleTrip, error)
 }
 
 type pushGateway interface {
@@ -19,6 +21,7 @@ type pushGateway interface {
 
 type positionMetrics interface {
 	StaleCheck(ctx context.Context, result string)
+	StaleScanRows(ctx context.Context, rows int)
 	PositionRequest(ctx context.Context, result string)
 	PositionRequestDuration(ctx context.Context, result string, d time.Duration)
 }

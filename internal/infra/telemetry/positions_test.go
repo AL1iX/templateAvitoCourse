@@ -48,6 +48,8 @@ func TestPositionMetrics(t *testing.T) {
 	metrics.StaleCheck(t.Context(), "queued")
 	metrics.StaleCheck(t.Context(), "duplicate")
 	metrics.StaleCheck(t.Context(), "dropped")
+	metrics.StaleScanRows(t.Context(), 250)
+	metrics.StaleScanRows(t.Context(), 0)
 	metrics.PositionRequest(t.Context(), "success")
 	metrics.PositionRequest(t.Context(), "error")
 	metrics.PositionRequest(t.Context(), "error")
@@ -60,6 +62,13 @@ func TestPositionMetrics(t *testing.T) {
 		countsByResult(t, collected["tripgo.stale_checks"]))
 	require.Equal(t, map[string]int64{"success": 1, "error": 2, "dropped": 1},
 		countsByResult(t, collected["tripgo.position_requests"]))
+
+	rows, ok := collected["tripgo.stale_scan.rows"].Data.(metricdata.Histogram[int64])
+	require.True(t, ok)
+	require.Len(t, rows.DataPoints, 1)
+	require.EqualValues(t, 2, rows.DataPoints[0].Count, "one measurement per tick")
+	require.EqualValues(t, 250, rows.DataPoints[0].Sum)
+	require.Equal(t, "{row}", collected["tripgo.stale_scan.rows"].Unit)
 
 	histogram, ok := collected["tripgo.position_requests.duration"].Data.(metricdata.Histogram[float64])
 	require.True(t, ok)

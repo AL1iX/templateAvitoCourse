@@ -15,15 +15,22 @@ const (
 	activeOnly   = "status = 'active'"
 )
 
-func (r *Repository) FindStale(ctx context.Context, staleAfter time.Duration) ([]model.StaleTrip, error) {
+func (r *Repository) FindStale(
+	ctx context.Context, staleAfter time.Duration, limit int, after *model.StaleCursor,
+) ([]model.StaleTrip, error) {
 	ctx, cancel := r.db.WithTimeout(ctx)
 	defer cancel()
 
-	query, args, err := sq.Select("id", "driver_id").
+	builder := sq.Select("id", "driver_id", lastActivity).
 		From("trips").
 		Where(activeOnly).
-		Where(sq.Expr(lastActivity+" < now() - make_interval(secs => ?)", staleAfter.Seconds())).
-		OrderBy(lastActivity + " ASC").
+		Where(sq.Expr(lastActivity+" < now() - make_interval(secs => ?)", staleAfter.Seconds()))
+	if after != nil {
+		builder = builder.Where(sq.Expr("("+lastActivity+", id) > (?, ?)", after.LastActivityAt, after.TripID))
+	}
+	query, args, err := builder.
+		OrderBy(lastActivity+" ASC", "id ASC").
+		Suffix("LIMIT ?", limit).
 		PlaceholderFormat(sq.Dollar).
 		ToSql()
 	if err != nil {
@@ -39,7 +46,7 @@ func (r *Repository) FindStale(ctx context.Context, staleAfter time.Duration) ([
 	trips := make([]model.StaleTrip, 0)
 	for rows.Next() {
 		var t model.StaleTrip
-		if err := rows.Scan(&t.TripID, &t.DriverID); err != nil {
+		if err := rows.Scan(&t.TripID, &t.DriverID, &t.LastActivityAt); err != nil {
 			return nil, fmt.Errorf("scan stale trip: %w", err)
 		}
 		trips = append(trips, t)

@@ -27,6 +27,7 @@ type Config struct {
 	StaleAfter     time.Duration
 	Workers        int
 	QueueSize      int
+	BatchSize      int
 	RequestTimeout time.Duration
 }
 
@@ -149,39 +150,57 @@ func (c *Component) tick(ctx context.Context) {
 	ctx, span := c.tracer.Start(ctx, "positions.scan")
 	defer span.End()
 
-	trips, err := c.finder.FindStale(ctx, c.cfg.StaleAfter)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "find stale trips failed")
-		if ctx.Err() == nil {
-			c.logger.ErrorContext(ctx, "find stale trips failed", "error", err)
-		}
-		return
-	}
+	read := 0
+	defer func() { c.metrics.StaleScanRows(ctx, read) }()
 
-	for _, t := range trips {
-		if ctx.Err() != nil {
+	var cursor *model.StaleCursor
+	for {
+		trips, err := c.finder.FindStale(ctx, c.cfg.StaleAfter, c.cfg.BatchSize, cursor)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "find stale trips failed")
+			if ctx.Err() == nil {
+				c.logger.ErrorContext(ctx, "find stale trips failed", "error", err)
+			}
 			return
 		}
-		c.enqueue(ctx, t, span.SpanContext())
+		read += len(trips)
+
+		queueFull := false
+		for _, t := range trips {
+			if ctx.Err() != nil {
+				return
+			}
+			if c.enqueue(ctx, t, span.SpanContext()) == resultDropped {
+				queueFull = true
+			}
+		}
+		if queueFull || len(trips) < c.cfg.BatchSize {
+			return
+		}
+
+		last := trips[len(trips)-1]
+		cursor = &model.StaleCursor{LastActivityAt: last.LastActivityAt, TripID: last.TripID}
 	}
 }
 
-func (c *Component) enqueue(ctx context.Context, t model.StaleTrip, scan trace.SpanContext) {
+func (c *Component) enqueue(ctx context.Context, t model.StaleTrip, scan trace.SpanContext) string {
 	version, added := c.inQueue.add(t.TripID)
 	if !added {
 		c.metrics.StaleCheck(ctx, resultDuplicate)
-		return
+		return resultDuplicate
 	}
 
 	select {
 	case c.queue <- task{trip: t, version: version, scan: scan}:
 		c.metrics.StaleCheck(ctx, resultQueued)
+		return resultQueued
 	default:
 		c.inQueue.finish(t.TripID, version)
 		c.metrics.StaleCheck(ctx, resultDropped)
 		c.metrics.PositionRequest(ctx, resultDropped)
 		c.logger.WarnContext(ctx, "position request queue is full, task dropped", "trip_id", t.TripID)
+		return resultDropped
 	}
 }
 

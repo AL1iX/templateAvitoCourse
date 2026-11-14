@@ -20,6 +20,8 @@ import (
 
 var positionPoint = domain.Point{Latitude: 59.93, Longitude: 30.33}
 
+const staleLimit = 100000
+
 func (f fixture) newSavedTrip(t *testing.T, startedAt time.Time) *domain.Trip {
 	t.Helper()
 
@@ -194,7 +196,7 @@ func TestListPositionsEmpty(t *testing.T) {
 func (f fixture) staleAmong(t *testing.T, ids ...string) []model.StaleTrip {
 	t.Helper()
 
-	all, err := f.repo.FindStale(t.Context(), time.Minute)
+	all, err := f.repo.FindStale(t.Context(), time.Minute, staleLimit, nil)
 	require.NoError(t, err)
 
 	var res []model.StaleTrip
@@ -220,10 +222,62 @@ func TestFindStale(t *testing.T) {
 	got := f.staleAmong(t,
 		silentSinceStart.ID(), silentSincePosition.ID(), freshNoPositions.ID(), freshWithPosition.ID(), completed.ID())
 
-	require.Equal(t, []model.StaleTrip{
-		{TripID: silentSinceStart.ID(), DriverID: silentSinceStart.DriverID()},
-		{TripID: silentSincePosition.ID(), DriverID: silentSincePosition.DriverID()},
-	}, got, "only active trips silent for more than a minute, the longest-silent first")
+	require.Len(t, got, 2, "only active trips silent for more than a minute")
+	require.Equal(t, silentSinceStart.ID(), got[0].TripID, "the longest-silent first")
+	require.Equal(t, silentSinceStart.DriverID(), got[0].DriverID)
+	require.True(t, silentSinceStart.StartedAt().Equal(got[0].LastActivityAt))
+	require.Equal(t, silentSincePosition.ID(), got[1].TripID)
+	require.Equal(t, silentSincePosition.DriverID(), got[1].DriverID)
+	require.True(t, got[1].LastActivityAt.After(got[0].LastActivityAt), "the last position, not the start of the trip")
+}
+
+func (f fixture) staleBatches(t *testing.T, limit int) [][]model.StaleTrip {
+	t.Helper()
+
+	var batches [][]model.StaleTrip
+	var cursor *model.StaleCursor
+	for {
+		batch, err := f.repo.FindStale(t.Context(), time.Minute, limit, cursor)
+		require.NoError(t, err)
+		batches = append(batches, batch)
+		if len(batch) < limit {
+			return batches
+		}
+		last := batch[len(batch)-1]
+		cursor = &model.StaleCursor{LastActivityAt: last.LastActivityAt, TripID: last.TripID}
+	}
+}
+
+func TestFindStaleBatchesWithCursorSkipNothingAndRepeatNothing(t *testing.T) {
+	const trips, batchSize = 250, 100
+	f := setup(t)
+	startedAt := now().Add(-10 * time.Minute)
+	want := make(map[string]bool, trips)
+	for range trips {
+		want[f.newSavedTrip(t, startedAt).ID()] = true
+	}
+
+	batches := f.staleBatches(t, batchSize)
+
+	require.GreaterOrEqual(t, len(batches), 3)
+	var ordered []model.StaleTrip
+	for _, b := range batches {
+		ordered = append(ordered, b...)
+	}
+	seen := make(map[string]bool, len(ordered))
+	for i, s := range ordered {
+		require.False(t, seen[s.TripID], "trip %s was returned twice", s.TripID)
+		seen[s.TripID] = true
+		if i > 0 {
+			prev := ordered[i-1]
+			require.True(t, prev.LastActivityAt.Before(s.LastActivityAt) ||
+				prev.LastActivityAt.Equal(s.LastActivityAt) && prev.TripID < s.TripID,
+				"batches must continue the order by last activity and id")
+		}
+	}
+	for id := range want {
+		require.True(t, seen[id], "trip %s was skipped", id)
+	}
 }
 
 func TestFindStaleOutOfOrderPositionDoesNotMakeTripStale(t *testing.T) {
@@ -305,7 +359,7 @@ func TestPositionStatementsApplyQueryTimeout(t *testing.T) {
 	})
 	t.Run("find stale", func(t *testing.T) {
 		requireTimeoutOnEveryStatement(t, f, 1, func(repo *triprepo.Repository) error {
-			_, err := repo.FindStale(t.Context(), time.Minute)
+			_, err := repo.FindStale(t.Context(), time.Minute, staleLimit, nil)
 			return err
 		}, nil)
 	})

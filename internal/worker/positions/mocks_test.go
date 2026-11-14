@@ -43,18 +43,18 @@ func (m *MockstaleTripFinder) EXPECT() *MockstaleTripFinderMockRecorder {
 }
 
 // FindStale mocks base method.
-func (m *MockstaleTripFinder) FindStale(ctx context.Context, staleAfter time.Duration) ([]model.StaleTrip, error) {
+func (m *MockstaleTripFinder) FindStale(ctx context.Context, staleAfter time.Duration, limit int, after *model.StaleCursor) ([]model.StaleTrip, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FindStale", ctx, staleAfter)
+	ret := m.ctrl.Call(m, "FindStale", ctx, staleAfter, limit, after)
 	ret0, _ := ret[0].([]model.StaleTrip)
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // FindStale indicates an expected call of FindStale.
-func (mr *MockstaleTripFinderMockRecorder) FindStale(ctx, staleAfter any) *gomock.Call {
+func (mr *MockstaleTripFinderMockRecorder) FindStale(ctx, staleAfter, limit, after any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindStale", reflect.TypeOf((*MockstaleTripFinder)(nil).FindStale), ctx, staleAfter)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FindStale", reflect.TypeOf((*MockstaleTripFinder)(nil).FindStale), ctx, staleAfter, limit, after)
 }
 
 // MockpushGateway is a mock of pushGateway interface.
@@ -153,4 +153,16 @@ func (m *MockpositionMetrics) StaleCheck(ctx context.Context, result string) {
 func (mr *MockpositionMetricsMockRecorder) StaleCheck(ctx, result any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StaleCheck", reflect.TypeOf((*MockpositionMetrics)(nil).StaleCheck), ctx, result)
+}
+
+// StaleScanRows mocks base method.
+func (m *MockpositionMetrics) StaleScanRows(ctx context.Context, rows int) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "StaleScanRows", ctx, rows)
+}
+
+// StaleScanRows indicates an expected call of StaleScanRows.
+func (mr *MockpositionMetricsMockRecorder) StaleScanRows(ctx, rows any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StaleScanRows", reflect.TypeOf((*MockpositionMetrics)(nil).StaleScanRows), ctx, rows)
 }

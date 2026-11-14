@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -29,7 +30,8 @@ const (
 	tripD = "trip-d"
 	tripE = "trip-e"
 
-	eventTimeout = 10 * time.Second
+	eventTimeout  = 10 * time.Second
+	testBatchSize = 1000
 
 	checkQueued    = "check:" + resultQueued
 	checkDuplicate = "check:" + resultDuplicate
@@ -94,6 +96,7 @@ type fixture struct {
 	finder  *MockstaleTripFinder
 	gateway *MockpushGateway
 	events  chan string
+	rows    chan int
 }
 
 func newFixture(t *testing.T, workers, queueSize int) *fixture {
@@ -105,6 +108,7 @@ func newFixture(t *testing.T, workers, queueSize int) *fixture {
 		finder:  NewMockstaleTripFinder(ctrl),
 		gateway: NewMockpushGateway(ctrl),
 		events:  make(chan string, 1000),
+		rows:    make(chan int, 100),
 	}
 	metrics := NewMockpositionMetrics(ctrl)
 	metrics.EXPECT().StaleCheck(gomock.Any(), gomock.Any()).
@@ -112,6 +116,8 @@ func newFixture(t *testing.T, workers, queueSize int) *fixture {
 	metrics.EXPECT().PositionRequest(gomock.Any(), gomock.Any()).
 		Do(func(_ context.Context, result string) { f.events <- "request:" + result }).AnyTimes()
 	metrics.EXPECT().PositionRequestDuration(gomock.Any(), gomock.Any(), gomock.Any()).AnyTimes()
+	metrics.EXPECT().StaleScanRows(gomock.Any(), gomock.Any()).
+		Do(func(_ context.Context, rows int) { f.rows <- rows }).AnyTimes()
 
 	f.c = New(
 		Config{
@@ -119,6 +125,7 @@ func newFixture(t *testing.T, workers, queueSize int) *fixture {
 			StaleAfter:     time.Minute,
 			Workers:        workers,
 			QueueSize:      queueSize,
+			BatchSize:      testBatchSize,
 			RequestTimeout: time.Minute,
 		},
 		f.finder, f.gateway, metrics,
@@ -191,7 +198,7 @@ func receive[T any](t *testing.T, ch <-chan T) T {
 
 func TestTickRequestsPositionOfStaleTrip(t *testing.T) {
 	f := newFixture(t, 1, 10)
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(nil)
 	f.start(t)
 
@@ -204,7 +211,7 @@ func TestTickDoesNotQueueTripThatIsAlreadyInTheQueue(t *testing.T) {
 	f := newFixture(t, 1, 10)
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA), nil).Times(2)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA), nil).Times(2)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).
 		DoAndReturn(func(context.Context, string, string) error {
 			started <- struct{}{}
@@ -236,7 +243,7 @@ func TestTripIsQueuedAgainOnceItsRequestIsFinished(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, 1, 10)
-			f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA), nil).Times(2)
+			f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA), nil).Times(2)
 			f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(tc.pushErr).Times(2)
 			f.start(t)
 
@@ -254,7 +261,7 @@ func TestPositionCancelsRequestBetweenQueueingAndProcessing(t *testing.T) {
 	f := newFixture(t, 1, 10)
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA, tripB), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA, tripB), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).
 		DoAndReturn(func(context.Context, string, string) error {
 			started <- struct{}{}
@@ -278,8 +285,8 @@ func TestStaleCopyAfterCancelAndRequeueIsDiscarded(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	gomock.InOrder(
-		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA, tripB), nil),
-		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripB), nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA, tripB), nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripB), nil),
 	)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).
 		DoAndReturn(func(context.Context, string, string) error {
@@ -307,7 +314,7 @@ func TestFullQueueDropsTripsWithoutBlockingTheScanner(t *testing.T) {
 	f := newFixture(t, 1, 2)
 	var logs bytes.Buffer
 	f.c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
 		Return(staleTrips(tripA, tripB, tripC, tripD, tripE), nil).Times(2)
 
 	f.c.tick(t.Context())
@@ -331,6 +338,72 @@ func TestFullQueueDropsTripsWithoutBlockingTheScanner(t *testing.T) {
 	}, drain(f.events), "the dropped trips left no trace in the queue and are retried")
 }
 
+func batchOf(from, n int) []model.StaleTrip {
+	base := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	trips := make([]model.StaleTrip, 0, n)
+	for i := from; i < from+n; i++ {
+		id := fmt.Sprintf("trip-%03d", i)
+		trips = append(trips, model.StaleTrip{
+			TripID: id, DriverID: driverOf(id), LastActivityAt: base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	return trips
+}
+
+func cursorAfter(trips []model.StaleTrip) *model.StaleCursor {
+	last := trips[len(trips)-1]
+	return &model.StaleCursor{LastActivityAt: last.LastActivityAt, TripID: last.TripID}
+}
+
+func TestScannerReadsAllBatchesContinuingFromTheLastRow(t *testing.T) {
+	f := newFixture(t, 1, 300)
+	f.c.cfg.BatchSize = 100
+	first, second, third := batchOf(0, 100), batchOf(100, 100), batchOf(200, 50)
+	gomock.InOrder(
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, 100, gomock.Nil()).Return(first, nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, 100, cursorAfter(first)).Return(second, nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, 100, cursorAfter(second)).Return(third, nil),
+	)
+
+	f.c.tick(t.Context())
+
+	events := drain(f.events)
+	require.Len(t, events, 250)
+	for _, e := range events {
+		require.Equal(t, checkQueued, e)
+	}
+	require.Equal(t, 250, f.c.QueueSize(), "every trip is queued once, none skipped")
+	require.Equal(t, 250, receive(t, f.rows))
+	require.Empty(t, f.rows, "one measurement per tick")
+}
+
+func TestScannerAsksAgainAfterAFullLastBatch(t *testing.T) {
+	f := newFixture(t, 1, 10)
+	f.c.cfg.BatchSize = 2
+	first := batchOf(0, 2)
+	gomock.InOrder(
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, 2, gomock.Nil()).Return(first, nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, 2, cursorAfter(first)).Return(nil, nil),
+	)
+
+	f.c.tick(t.Context())
+
+	require.Equal(t, []string{checkQueued, checkQueued}, drain(f.events))
+	require.Equal(t, 2, receive(t, f.rows))
+}
+
+func TestScannerStopsReadingBatchesWhenQueueIsFull(t *testing.T) {
+	f := newFixture(t, 1, 2)
+	f.c.cfg.BatchSize = 3
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, 3, gomock.Nil()).Return(batchOf(0, 3), nil)
+
+	f.c.tick(t.Context())
+
+	require.ElementsMatch(t,
+		[]string{checkQueued, checkQueued, checkDropped, requestDropped}, drain(f.events))
+	require.Equal(t, 3, receive(t, f.rows), "the next batch is not read, the next tick starts again")
+}
+
 func TestPoolRunsConfiguredNumberOfWorkers(t *testing.T) {
 	const (
 		workers = 3
@@ -344,7 +417,7 @@ func TestPoolRunsConfiguredNumberOfWorkers(t *testing.T) {
 	var inFlight, maxInFlight, calls atomic.Int32
 	started := make(chan struct{}, tasks)
 	release := make(chan struct{})
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(ids...), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(ids...), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), gomock.Any(), gomock.Any()).
 		DoAndReturn(func(context.Context, string, string) error {
 			current := inFlight.Add(1)
@@ -382,7 +455,7 @@ func TestStopDrainsTheQueueAndStopsTheTicker(t *testing.T) {
 	f := newFixture(t, 1, 10)
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA, tripB, tripC), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA, tripB, tripC), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).
 		DoAndReturn(func(context.Context, string, string) error {
 			started <- struct{}{}
@@ -415,7 +488,7 @@ func TestStopDrainsTheQueueAndStopsTheTicker(t *testing.T) {
 
 func TestContextCancellationStopsScannerAndWorkers(t *testing.T) {
 	f := newFixture(t, 2, 10)
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA, tripB), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA, tripB), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripB, driverOf(tripB)).Return(nil)
 	before := goleak.IgnoreCurrent()
@@ -432,7 +505,7 @@ func TestContextCancellationStopsScannerAndWorkers(t *testing.T) {
 func TestStopAbortsRequestsWhenTheBudgetIsSpent(t *testing.T) {
 	f := newFixture(t, 1, 10)
 	started := make(chan struct{}, 1)
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA, tripB), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA, tripB), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).
 		DoAndReturn(func(ctx context.Context, _, _ string) error {
 			started <- struct{}{}
@@ -456,7 +529,7 @@ func TestStopAbortsRequestsWhenTheBudgetIsSpent(t *testing.T) {
 
 func TestPushErrorDoesNotStopTheWorker(t *testing.T) {
 	f := newFixture(t, 1, 10)
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA, tripB), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA, tripB), nil)
 	gomock.InOrder(
 		f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(errors.New("push is down")),
 		f.gateway.EXPECT().RequestPosition(gomock.Any(), tripB, driverOf(tripB)).Return(nil),
@@ -474,8 +547,8 @@ func TestTicksDoNotOverlap(t *testing.T) {
 	var inFlight, maxInFlight atomic.Int32
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).
-		DoAndReturn(func(context.Context, time.Duration) ([]model.StaleTrip, error) {
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+		DoAndReturn(func(context.Context, time.Duration, int, *model.StaleCursor) ([]model.StaleTrip, error) {
 			current := inFlight.Add(1)
 			for {
 				seen := maxInFlight.Load()
@@ -507,8 +580,8 @@ func TestTicksDoNotOverlap(t *testing.T) {
 func TestFailedScanDoesNotStopTheScanner(t *testing.T) {
 	f := newFixture(t, 1, 10)
 	gomock.InOrder(
-		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(nil, errors.New("database is down")),
-		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA), nil),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(nil, errors.New("database is down")),
+		f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA), nil),
 	)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(nil)
 	f.start(t)
@@ -533,7 +606,7 @@ func TestScanFailureIsLoggedUnlessTheServiceIsStopping(t *testing.T) {
 			f := newFixture(t, 1, 10)
 			var logs bytes.Buffer
 			f.c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
-			f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(nil, errors.New("database is down"))
+			f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(nil, errors.New("database is down"))
 			ctx, cancel := context.WithCancel(t.Context())
 			if tc.cancelCtx {
 				cancel()
@@ -552,7 +625,7 @@ func TestProcessSpanIsLinkedToScanSpanAndNotItsChild(t *testing.T) {
 	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
 	f := newFixture(t, 1, 10)
 	f.c.tracer = provider.Tracer("test")
-	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute).Return(staleTrips(tripA), nil)
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).Return(staleTrips(tripA), nil)
 	f.gateway.EXPECT().RequestPosition(gomock.Any(), tripA, driverOf(tripA)).Return(nil)
 	f.start(t)
 	f.ticker.tick(t)
