@@ -188,3 +188,23 @@ func TestPriorityQueueKeepsEveryTaskUnderConcurrentUse(t *testing.T) {
 	require.Equal(t, accepted-evicted, popped, "every accepted task is either popped or was evicted")
 	require.Zero(t, q.size())
 }
+
+func TestPriorityQueueRemoveTakesOutOnlyTheMatchingVersion(t *testing.T) {
+	q := newPriorityQueue(5)
+	q.push(queued("a", 1, 1))
+	q.push(queued("b", 2, 2))
+	q.push(queued("b", 3, 3))
+	q.push(queued("c", 4, 4))
+
+	q.remove("b", 2)
+	q.remove("b", 99)
+	q.remove("zzz", 1)
+
+	require.Equal(t, 3, q.size())
+	got := make([]uint64, 0, 3)
+	for range 3 {
+		tk, _ := q.pop()
+		got = append(got, tk.version)
+	}
+	require.Equal(t, []uint64{1, 3, 4}, got, "the newer copy of the same trip stays")
+}

@@ -24,11 +24,13 @@ func (q *inQueue) add(tripID string) (uint64, bool) {
 	return q.next, true
 }
 
-func (q *inQueue) cancel(tripID string) {
+func (q *inQueue) cancel(tripID string) (uint64, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	version, exists := q.versions[tripID]
 	delete(q.versions, tripID)
+	return version, exists
 }
 
 func (q *inQueue) current(tripID string, version uint64) bool {

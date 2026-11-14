@@ -280,7 +280,7 @@ func TestPositionCancelsRequestBetweenQueueingAndProcessing(t *testing.T) {
 	require.Equal(t, []string{requestSuccess}, drain(f.events), "only the trip that was not cancelled is requested")
 }
 
-func TestStaleCopyAfterCancelAndRequeueIsDiscarded(t *testing.T) {
+func TestCancelTakesTheTripOutOfTheQueueAndItIsQueuedOnceAgain(t *testing.T) {
 	f := newFixture(t, 1, 10)
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -300,14 +300,34 @@ func TestStaleCopyAfterCancelAndRequeueIsDiscarded(t *testing.T) {
 	require.Equal(t, []string{checkQueued, checkQueued}, waitEvents(t, f.events, 2))
 	receive(t, started)
 
+	require.Equal(t, 1, f.c.QueueSize())
 	f.c.Cancel(tripB)
+	require.Zero(t, f.c.QueueSize(), "the cancelled task leaves the queue")
 	f.ticker.tick(t)
 	require.Equal(t, []string{checkQueued}, waitEvents(t, f.events, 1), "the cancelled trip is queued again")
+	require.Equal(t, 1, f.c.QueueSize(), "the trip is in the queue once")
 	close(release)
 	f.stop(t)
 
 	require.Equal(t, []string{requestSuccess, requestSuccess}, drain(f.events),
-		"two copies of the second trip are in the queue, only the current one is requested")
+		"each trip is requested once")
+}
+
+func TestTaskTakenByAWorkerBeforeCancelIsDiscardedEvenIfTheTripIsQueuedAgain(t *testing.T) {
+	f := newFixture(t, 1, 10)
+	f.c.forceCtx, f.c.abort = context.WithCancel(t.Context())
+	f.finder.EXPECT().FindStale(gomock.Any(), time.Minute, testBatchSize, gomock.Nil()).
+		Return(staleTrips(tripA), nil).Times(2)
+	f.c.tick(t.Context())
+	taken, ok := f.c.queue.pop()
+	require.True(t, ok)
+	f.c.Cancel(tripA)
+	f.c.tick(t.Context())
+
+	f.c.handle(taken)
+
+	require.Equal(t, []string{checkQueued, checkQueued}, drain(f.events), "no request for the cancelled copy")
+	require.Equal(t, 1, f.c.QueueSize(), "the new copy is still waiting")
 }
 
 func TestFullQueueDropsTripsWithoutBlockingTheScanner(t *testing.T) {
@@ -455,7 +475,7 @@ func TestFullQueueEvictsTheFresherTripForAnOlderOne(t *testing.T) {
 	require.Equal(t, []string{tripA, tripB}, []string{first.trip.TripID, second.trip.TripID})
 }
 
-func TestEvictingACancelledTaskIsNotCountedAsDropped(t *testing.T) {
+func TestCancelledTaskDoesNotTakeASlotFromTheNextTrip(t *testing.T) {
 	f := newFixture(t, 1, 2)
 	var logs bytes.Buffer
 	f.c.logger = slog.New(slog.NewJSONHandler(&logs, nil))
@@ -471,7 +491,8 @@ func TestEvictingACancelledTaskIsNotCountedAsDropped(t *testing.T) {
 
 	f.c.tick(t.Context())
 
-	require.Equal(t, []string{checkQueued}, drain(f.events), "the cancelled copy was already not going to be requested")
+	require.Equal(t, []string{checkQueued}, drain(f.events), "the freed slot is used, nothing is dropped or evicted")
+	require.Equal(t, 2, f.c.QueueSize())
 	require.NotContains(t, logs.String(), `"level":"WARN"`)
 }
 

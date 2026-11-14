@@ -91,7 +91,7 @@ func build(ctx context.Context, cfg config.Config, tel *telemetry.Telemetry) (*C
 		return nil, err
 	}
 
-	pushClient := push.New(cfg.PushHTTPURL, cfg.PushRequestTimeout)
+	pushClient := push.New(cfg.PushHTTPURL, cfg.PushRequestTimeout, tel.Propagator)
 	poller := positions.New(
 		positions.Config{
 			CheckInterval:  cfg.PositionCheckInterval,
@@ -219,6 +219,9 @@ func (c *Container) shutdown(
 func (c *Container) cleanupExpiredKeys(ctx context.Context) {
 	ticker := time.NewTicker(idempotencyCleanupInterval)
 	defer ticker.Stop()
+
+	c.logger.InfoContext(ctx, "idempotency cleanup started", "interval", idempotencyCleanupInterval)
+	defer c.logger.InfoContext(ctx, "idempotency cleanup stopped")
 
 	for {
 		n, err := c.tripRepo.DeleteExpiredKeys(ctx)

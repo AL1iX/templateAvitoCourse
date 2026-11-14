@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 const (
@@ -52,7 +54,7 @@ func TestRequestPositionSendsContractRequest(t *testing.T) {
 		_, _ = io.WriteString(w, acceptedBody)
 	})
 
-	err := New(srv.URL, time.Second).RequestPosition(t.Context(), tripID, driverID)
+	err := New(srv.URL, time.Second, propagation.TraceContext{}).RequestPosition(t.Context(), tripID, driverID)
 
 	require.NoError(t, err)
 	req := <-got
@@ -71,6 +73,22 @@ func TestRequestPositionSendsContractRequest(t *testing.T) {
 	}, req.body, "exactly the fields of the contract, the stub rejects unknown ones")
 }
 
+func TestRequestPositionPropagatesTraceContext(t *testing.T) {
+	var traceparent string
+	srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		traceparent = r.Header.Get("Traceparent")
+		w.WriteHeader(http.StatusAccepted)
+	})
+	ctx, span := sdktrace.NewTracerProvider().Tracer("test").Start(t.Context(), "push")
+	defer span.End()
+
+	err := New(srv.URL, time.Second, propagation.TraceContext{}).RequestPosition(ctx, tripID, driverID)
+
+	require.NoError(t, err)
+	require.Contains(t, traceparent, span.SpanContext().TraceID().String())
+	require.Contains(t, traceparent, span.SpanContext().SpanID().String())
+}
+
 func TestRequestPositionTrailingSlashInBaseURL(t *testing.T) {
 	paths := make(chan string, 1)
 	srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +96,7 @@ func TestRequestPositionTrailingSlashInBaseURL(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 	})
 
-	err := New(srv.URL+"/", time.Second).RequestPosition(t.Context(), tripID, driverID)
+	err := New(srv.URL+"/", time.Second, propagation.TraceContext{}).RequestPosition(t.Context(), tripID, driverID)
 
 	require.NoError(t, err)
 	require.Equal(t, "/api/v1/push", <-paths)
@@ -103,7 +121,7 @@ func TestRequestPositionClassifiesStatuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newServer(t, respondWith(tc.status))
 
-			err := New(srv.URL, time.Second).RequestPosition(t.Context(), tripID, driverID)
+			err := New(srv.URL, time.Second, propagation.TraceContext{}).RequestPosition(t.Context(), tripID, driverID)
 
 			switch {
 			case tc.wantErr != nil:
@@ -128,7 +146,7 @@ func TestRequestPositionTransportError(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	err := New(url, time.Second).RequestPosition(t.Context(), tripID, driverID)
+	err := New(url, time.Second, propagation.TraceContext{}).RequestPosition(t.Context(), tripID, driverID)
 
 	require.ErrorIs(t, err, ErrTransport)
 	require.NotErrorIs(t, err, ErrRejected)
@@ -144,7 +162,9 @@ func TestRequestPositionContextCancelled(t *testing.T) {
 	})
 	ctx, cancel := context.WithCancel(t.Context())
 	result := make(chan error, 1)
-	go func() { result <- New(srv.URL, time.Minute).RequestPosition(ctx, tripID, driverID) }()
+	go func() {
+		result <- New(srv.URL, time.Minute, propagation.TraceContext{}).RequestPosition(ctx, tripID, driverID)
+	}()
 
 	<-started
 	cancel()
@@ -160,7 +180,7 @@ func TestRequestPositionClientTimeout(t *testing.T) {
 		<-r.Context().Done()
 	})
 
-	err := New(srv.URL, 20*time.Millisecond).RequestPosition(t.Context(), tripID, driverID)
+	err := New(srv.URL, 20*time.Millisecond, propagation.TraceContext{}).RequestPosition(t.Context(), tripID, driverID)
 
 	require.ErrorIs(t, err, ErrTransport)
 	var netErr net.Error
@@ -187,7 +207,7 @@ func TestResponseBodyIsAlwaysClosed(t *testing.T) {
 	} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			body := &trackingBody{}
-			c := New("http://push.test", time.Second)
+			c := New("http://push.test", time.Second, propagation.TraceContext{})
 			c.http.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: status, Header: http.Header{}, Body: body}, nil
 			})
@@ -202,7 +222,7 @@ func TestResponseBodyIsAlwaysClosed(t *testing.T) {
 func TestNewDerivesAllTimeoutsFromOneSetting(t *testing.T) {
 	const timeout = 1500 * time.Millisecond
 
-	c := New("http://push.test", timeout)
+	c := New("http://push.test", timeout, propagation.TraceContext{})
 
 	require.NotSame(t, http.DefaultClient, c.http)
 	require.Equal(t, timeout, c.http.Timeout)

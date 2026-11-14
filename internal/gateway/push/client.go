@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 const (
@@ -35,18 +36,20 @@ type request struct {
 }
 
 type Client struct {
-	url  string
-	http *http.Client
+	url        string
+	propagator propagation.TextMapPropagator
+	http       *http.Client
 }
 
-func New(baseURL string, timeout time.Duration) *Client {
+func New(baseURL string, timeout time.Duration, propagator propagation.TextMapPropagator) *Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: timeout}).DialContext
 	transport.TLSHandshakeTimeout = timeout
 	transport.ResponseHeaderTimeout = timeout
 	return &Client{
-		url:  strings.TrimRight(baseURL, "/") + pushPath,
-		http: &http.Client{Transport: transport, Timeout: timeout},
+		url:        strings.TrimRight(baseURL, "/") + pushPath,
+		propagator: propagator,
+		http:       &http.Client{Transport: transport, Timeout: timeout},
 	}
 }
 
@@ -70,6 +73,7 @@ func (c *Client) RequestPosition(ctx context.Context, tripID, driverID string) e
 		return fmt.Errorf("build push request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
 	resp, err := c.http.Do(req)
 	if err != nil {

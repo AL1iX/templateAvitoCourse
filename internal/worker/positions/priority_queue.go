@@ -65,6 +65,19 @@ func (q *priorityQueue) pop() (task, bool) {
 	return t, true
 }
 
+func (q *priorityQueue) remove(tripID string, version uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for i, t := range q.items {
+		if t.trip.TripID == tripID && t.version == version {
+			copy(q.items[i:], q.items[i+1:])
+			q.items = q.items[:len(q.items)-1]
+			return
+		}
+	}
+}
+
 func (q *priorityQueue) size() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()

@@ -118,7 +118,9 @@ func (c *Component) Stop(ctx context.Context) error {
 }
 
 func (c *Component) Cancel(tripID string) {
-	c.inQueue.cancel(tripID)
+	if version, exists := c.inQueue.cancel(tripID); exists {
+		c.queue.remove(tripID, version)
+	}
 }
 
 func (c *Component) QueueSize() int {

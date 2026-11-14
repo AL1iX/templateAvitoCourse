@@ -62,7 +62,7 @@ func TestInQueueStaleVersionDoesNotTouchTheNewEntry(t *testing.T) {
 	fresh, ok := q.add("t1")
 	require.True(t, ok)
 
-	require.False(t, q.current("t1", stale), "the old copy in the channel must be discarded")
+	require.False(t, q.current("t1", stale), "a worker that took the old copy must discard it")
 	require.True(t, q.current("t1", fresh))
 
 	q.finish("t1", stale)
@@ -99,4 +99,16 @@ func TestInQueueConcurrentUseIsRaceFree(t *testing.T) {
 
 	_, ok := q.add("t1")
 	require.True(t, ok, "every goroutine ended with a cancel, so nothing is left in the map")
+}
+
+func TestInQueueCancelReturnsTheRemovedVersion(t *testing.T) {
+	q := newInQueue()
+	version, _ := q.add("t1")
+
+	got, existed := q.cancel("t1")
+	require.True(t, existed)
+	require.Equal(t, version, got)
+
+	_, existed = q.cancel("t1")
+	require.False(t, existed, "nothing left to cancel")
 }
